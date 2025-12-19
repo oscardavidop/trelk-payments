@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <!-- 
+    seo -->
+    <title>Trelk Bot - El bot todo en uno para Telegram</title>
+    <meta name="description"
+        content="Trelk Bot es el bot todo en uno para Telegram que integra IA avanzada, descargas multimedia, automatización inteligente y entretenimiento en una sola plataforma.">
+    <meta name="keywords"
+        content="Trelk Bot, Telegram Bot, Bot de IA, Descargas Multimedia, Automatización, Entretenimiento, Bot Todo en Uno, Bots Labs">
+    <meta name="author" content="Bots Labs">
+    <meta property="og:title" content="Trelk Bot - El bot todo en uno para Telegram">
+    <meta property="og:description"
+        content="Trelk Bot es el bot todo en uno para Telegram que integra IA avanzada, descargas multimedia, automatización inteligente y entretenimiento en una sola plataforma.">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://trelkbot.com">
+    <meta property="og:image" content="https://trelkbot.com/og-image.png">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Trelk Bot - El bot todo en uno para Telegram">
+    <meta name="twitter:description"
+        content="Trelk Bot es el bot todo en uno para Telegram que integra IA avanzada, descargas multimedia, automatización inteligente y entretenimiento en una sola plataforma.">
+    <meta name="twitter:image" content="https://trelkbot.com/og-image.png">
+    <!-- Favicon -->
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <!-- Fonts -->
+
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;600;800&display=swap"
+        rel="stylesheet">
+
+    <style>
+        :root {
+            --bg: #050505;
+            --card: rgba(15, 15, 15, .65);
+            --primary: #0088cc;
+            --telegram: #229ED9;
+            --accent: #00ffcc;
+            --text: #ffffff;
+            --dim: #a1a1aa;
+            --border: rgba(255, 255, 255, .08);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            background:
+                radial-gradient(circle at 50% -20%, rgba(0, 136, 204, .18), transparent 55%),
+                radial-gradient(circle at 0% 100%, rgba(0, 255, 204, .06), transparent 35%),
+                var(--bg);
+            color: var(--text);
+            line-height: 1.7;
+        }
+
+        /* NAV */
+        nav {
+            padding: 28px 10%;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            backdrop-filter: blur(10px);
+            position: sticky;
+            top: 0;
+            z-index: 50;
+        }
+
+        .logo {
+            font-size: 22px;
+            font-weight: 800;
+        }
+
+        .logo span {
+            color: var(--primary);
+        }
+
+        /* HERO */
+        .hero {
+            padding: 160px 10% 120px;
+            text-align: center;
+        }
+
+
+
+        .badge {
+            display: inline-block;
+            padding: 7px 20px;
+            border-radius: 999px;
+            border: 1px solid var(--border);
+            color: var(--accent);
+            font-size: 13px;
+            margin-bottom: 30px;
+            font-weight: 600;
+        }
+
+        .hero h1 {
+            font-size: clamp(52px, 9vw, 92px);
+            font-weight: 800;
+            letter-spacing: -4px;
+            line-height: 1.05;
+        }
+
+        .hero h1 span {
+            display: block;
+            color: var(--primary);
+        }
+
+        .hero p {
+            max-width: 780px;
+            margin: 40px auto 60px;
+            font-size: 21px;
+            color: var(--dim);
+        }
+
+        /* TELEGRAM BUTTON */
+        .btn-telegram {
+            display: inline-flex;
+            align-items: center;
+            gap: 14px;
+            background: var(--telegram);
+            color: white;
+            padding: 20px 54px;
+            border-radius: 20px;
+            font-weight: 700;
+            font-size: 18px;
+            text-decoration: none;
+            transition: .3s;
+            box-shadow: 0 0 0 rgba(34, 158, 217, .0);
+        }
+
+        .btn-telegram:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 0 40px rgba(34, 158, 217, .45);
+        }
+
+        /* SECTIONS */
+        section {
+            padding: 120px 10%;
+        }
+
+        .section-title {
+            max-width: 900px;
+            margin-bottom: 70px;
+        }
+
+        .section-title h2 {
+            font-size: 46px;
+            font-weight: 800;
+            margin-bottom: 20px;
+        }
+
+        .section-title p {
+            font-size: 18px;
+            color: var(--dim);
+        }
+
+        /* GRID */
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 30px;
+        }
+
+        .card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 32px;
+            padding: 40px;
+            backdrop-filter: blur(14px);
+            transition: .3s;
+        }
+
+        .card:hover {
+            border-color: var(--primary);
+        }
+
+        .card:hover {
+            transform: translateY(-6px) scale(1.01);
+        }
+
+        html {
+            scroll-behavior: smooth;
+        }
+
+
+        /* EMPHASIS */
+        .highlight {
+            color: var(--accent);
+            font-weight: 700;
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .reveal {
+                transition: none;
+                transform: none;
+                opacity: 1;
+            }
+        }
+
+        /* CTA FINAL */
+        .cta {
+            text-align: center;
+            padding: 140px 10%;
+            background: linear-gradient(to bottom, transparent, rgba(0, 0, 0, .6));
+        }
+
+        .cta h2 {
+            font-size: 54px;
+            font-weight: 800;
+            margin-bottom: 25px;
+        }
+
+        .cta p {
+            max-width: 720px;
+            margin: 0 auto 50px;
+            font-size: 20px;
+            color: var(--dim);
+        }
+
+        /* FOOTER */
+        footer {
+            padding: 80px 10% 40px;
+            text-align: center;
+            color: var(--dim);
+            border-top: 1px solid var(--border);
+        }
+
+
+        /* =========================
+   SCROLL ANIMATIONS
+   ========================= */
+
+        .reveal {
+            opacity: 0;
+            transform: translateY(40px);
+            transition:
+                opacity 0.8s ease,
+                transform 0.8s cubic-bezier(.22, 1, .36, 1);
+            will-change: opacity, transform;
+        }
+
+        .reveal.show {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        /* Variantes */
+        .reveal-left {
+            transform: translateX(-40px);
+        }
+
+        .reveal-right {
+            transform: translateX(40px);
+        }
+
+        .reveal-scale {
+            transform: scale(0.95);
+        }
+
+        /* Stagger automático */
+        .stagger>* {
+            transition-delay: var(--delay);
+        }
+
+        /* en mobiles */
+        @media (max-width: 600px) {
+            .hero {
+                padding: 50px 5% 80px;
+            }
+
+            section {
+                padding: 30px 10% 80px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <nav>
+        <div class="logo">Trelk<span>Bot</span></div>
+        <div style="font-size:12px;color:var(--dim)">Bots Labs</div>
+    </nav>
+
+    <header class="hero reveal">
+        <div class="badge">Versión BETA ya disponible</div>
+
+        <h1>
+            Un solo bot.
+            <span class="type-text reveal" data-text="Todo Telegram."></span>
+        </h1>
+        <p>
+            IA avanzada, descargas multimedia, automatización inteligente y entretenimiento,
+            diseñados para usuarios que <span class="highlight">exigen más</span> de Telegram.
+            Trelk no es un bot más: es una plataforma viva en constante evolución.
+        </p>
+
+        <a href="https://t.me/TrelkBot" class="btn-telegram">
+             Añadir a Telegram
+        </a>
+    </header>
+
+    <section>
+        <div class="section-title reveal">
+            <h2>¿Por qué existe Trelk?</h2>
+            <p>
+                Telegram está lleno de bots. La mayoría hacen una sola cosa, mal y con límites absurdos.
+                Trelk nace para eliminar esa fragmentación y ofrecer una experiencia unificada, potente
+                y sin fricción.
+            </p>
+        </div>
+
+        <div class="grid stagger reveal">
+            <div class="card reveal">
+                <h3>🧠 Inteligencia real</h3>
+                <p>
+                    No simples respuestas automáticas. Trelk integra modelos de IA avanzados
+                    para traducción, análisis, generación de contenido y utilidades reales.
+                </p>
+            </div>
+
+            <div class="card reveal">
+                <h3>🛸 Multimedia sin rodeos</h3>
+                <p>
+                    Descargas rápidas, audio, video, imágenes y archivos optimizados.
+                    Sin spam, sin esperas innecesarias, sin interfaces rotas.
+                </p>
+            </div>
+
+            <div class="card reveal">
+                <h3>🎮 Diversión integrada</h3>
+                <p>
+                    Juegos, dinámicas y comandos interactivos pensados para uso diario,
+                    no como un extra olvidable.
+                </p>
+            </div>
+        </div>
+    </section>
+
+    <section>
+        <div class="section-title reveal">
+            <h2>No es otro bot</h2>
+            <p>
+                Trelk está diseñado como un <span class="highlight">ecosistema</span>.
+                Infraestructura dedicada, arquitectura modular y desarrollo continuo.
+            </p>
+        </div>
+
+        <div class="grid">
+            <div class="card reveal">⚡ Infraestructura optimizada 24/7</div>
+            <div class="card reveal">🔐 Seguridad y privacidad primero</div>
+            <div class="card reveal">🔁 Actualizaciones constantes</div>
+            <div class="card reveal">👑 Plan Pro para usuarios avanzados</div>
+        </div>
+    </section>
+
+    <section class="cta reveal reveal-scale">
+        <h2>Empieza gratis. Mejora cuando quieras.</h2>
+        <p>
+            Únete a miles de usuarios que ya usan Trelk como su bot principal.
+            Sin compromisos, sin letras pequeñas.
+        </p>
+        <a href="https://t.me/TrelkBot" class="btn-telegram">
+            Abrir Trelk en Telegram
+        </a>
+    </section>
+
+    <footer>
+        © <span class="type-text reveal" id="currentYear"></span> Bots Labs · Trelk Bot v1.8.0
+    </footer>
+    <script>
+        document.getElementById('currentYear').textContent = new Date().getFullYear();
+        document.getElementById('currentYear').setAttribute('data-text', new Date().getFullYear());
+
+        const reveals = document.querySelectorAll('.reveal')
+
+        const observer = new IntersectionObserver(
+            entries => {
+                entries.forEach((entry, index) => {
+                    if (entry.isIntersecting) {
+                        entry.target.classList.add('show')
+
+                        // Stagger interno
+                        if (entry.target.classList.contains('stagger')) {
+                            [...entry.target.children].forEach((el, i) => {
+                                el.style.setProperty('--delay', `${i * 0.08}s`)
+                                el.classList.add('reveal', 'show')
+                            })
+                        }
+
+                        observer.unobserve(entry.target)
+                    }
+                })
+            },
+            {
+                threshold: 0.15
+            }
+        )
+
+        reveals.forEach(el => observer.observe(el))
+
+
+        document.querySelectorAll('.type-text').forEach(el => {
+            const text = el.dataset.text
+            el.textContent = ''
+
+            let i = 0
+            const interval = setInterval(() => {
+                el.textContent += text[i]
+                i++
+                if (i >= text.length) clearInterval(interval)
+            }, 45)
+        })
+    </script>
+
+</body>
+
+</html>

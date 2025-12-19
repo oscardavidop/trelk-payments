@@ -1,0 +1,214 @@
+
+
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Elige tu Plan Premium</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --primary: #2563eb;
+      --accent: #f59e0b;
+      --bg: #f1f5f9;
+      --text: #1e293b;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 50px 20px;
+    }
+
+    .header-text { text-align: center; margin-bottom: 40px; }
+    .header-text h1 { font-size: 36px; font-weight: 800; margin-bottom: 10px; }
+
+    .pricing-container {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 25px;
+      max-width: 1100px;
+      width: 100%;
+    }
+
+    .plan-card {
+      background: white;
+      border-radius: 24px;
+      padding: 30px;
+      position: relative;
+      border: 2px solid transparent;
+      transition: all 0.3s ease;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 10px 25px -5px rgba(0,0,0,0.05);
+    }
+
+    .plan-card.popular { border-color: var(--primary); transform: scale(1.05); z-index: 10; }
+    .plan-card.popular .badge-pop {
+      position: absolute; top: -15px; left: 50%; transform: translateX(-50%);
+      background: var(--primary); color: white; padding: 5px 15px; border-radius: 20px; font-size: 12px; font-weight: bold;
+    }
+
+    .discount-tag {
+      color: #ef4444; font-weight: bold; font-size: 14px; text-decoration: line-through; opacity: 0.7;
+    }
+
+    .plan-name { font-size: 20px; font-weight: 700; margin-bottom: 10px; }
+    .plan-price { font-size: 40px; font-weight: 800; margin-bottom: 20px; }
+    .plan-price span { font-size: 16px; color: #64748b; font-weight: 400; }
+
+    .features { list-style: none; margin-bottom: 30px; flex-grow: 1; }
+    .features li { margin-bottom: 12px; display: flex; align-items: center; font-size: 14px; }
+    .features li::before { content: "✓"; color: #10b981; font-weight: bold; margin-right: 10px; }
+
+    .select-btn {
+      background: var(--text); color: white; border: none; padding: 15px; border-radius: 12px;
+      font-weight: 700; cursor: pointer; transition: background 0.3s; width: 100%;
+    }
+    .select-btn:hover { background: #000; }
+
+    /* Área de PayPal oculta inicialmente */
+    #paypal-section {
+      margin-top: 50px;
+      display: none;
+      background: white;
+      padding: 40px;
+      border-radius: 24px;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+      max-width: 450px;
+      width: 100%;
+      text-align: center;
+      animation: fadeIn 0.5s ease forwards;
+    }
+
+    /* footer styles */
+    footer {
+      margin-top: 50px;
+      text-align: center;
+      color: #94a3b8;
+      font-size: 12px;
+      /* abajo del toodo */
+        position: absolute;
+        bottom: 0;
+        width: 100%;
+        /* abajo en lo ultimo */
+
+
+    }
+
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+  </style>
+</head>
+<body>
+
+  <div class="header-text">
+    <h1>Elige tu Experiencia</h1>
+    <p>Precios especiales por tiempo limitado ⚡</p>
+  </div>
+
+  <div class="pricing-container">
+    <div class="plan-card">
+      <div class="plan-name">Básico</div>
+      <div class="discount-tag">$15.00 USD</div>
+      <div class="plan-price">$5.00 <span>/ mes</span></div>
+      <ul class="features">
+        <li>Acceso Estándar</li>
+        <li>Soporte por Email</li>
+      </ul>
+      <button class="select-btn" onclick="selectPlan('P-BASIC_ID', 'Básico', '5.00')">Seleccionar Plan</button>
+    </div>
+
+    <div class="plan-card popular">
+      <div class="badge-pop">MÁS POPULAR</div>
+      <div class="plan-name">Premium Pro</div>
+      <div class="discount-tag">$25.00 USD</div>
+      <div class="plan-price">$10.00 <span>/ mes</span></div>
+      <ul class="features">
+        <li>Todo en Básico</li>
+        <li>Soporte Prioritario 24/7</li>
+        <li>Contenido Exclusivo</li>
+      </ul>
+      <button class="select-btn" onclick="selectPlan('P-7K713702K02450543NFCK3FA', 'Premium Pro', '10.00')">Seleccionar Plan</button>
+    </div>
+
+    <div class="plan-card">
+      <div class="plan-name">VIP Business</div>
+      <div class="discount-tag">$50.00 USD</div>
+      <div class="plan-price">$29.00 <span>/ mes</span></div>
+      <ul class="features">
+        <li>Todo en Pro</li>
+        <li>Consultoría 1-a-1</li>
+        <li>Acceso Early Bird</li>
+      </ul>
+      <button class="select-btn" onclick="selectPlan('P-BUSINESS_ID', 'VIP Business', '29.00')">Seleccionar Plan</button>
+    </div>
+  </div>
+    <p style="margin-top: 20px; font-size: 12px; color: #64748b;">
+        Puedes cancelar tu suscripción en cualquier momento.
+    </p>
+
+  <div id="paypal-section">
+    <h2 id="selected-plan-name" style="margin-bottom: 5px;">Plan Seleccionado</h2>
+    <p id="selected-plan-price" style="color: var(--primary); font-weight: 800; font-size: 24px; margin-bottom: 25px;"></p>
+    <div id="paypal-button-container"></div>
+    <button onclick="window.location.reload()" style="margin-top: 15px; background: none; border: none; color: #64748b; cursor: pointer; text-decoration: underline;">Cambiar de plan</button>
+  </div>
+  <footer>
+   <!-- cancela cuando quieras -->
+  
+    <p style="margin-top: 50px; font-size: 12px; color: #94a3b8;">&copy; 2025 Bots Lab INC. Todos los derechos reservados.</p>
+
+     <p>
+        Desarrollado por <a href="https://botslab.info" target="_blank" style="color: var(--primary); font-weight: 600; text-decoration: none;">Bots Lab INC.</a>
+    </p>
+  </footer>
+
+  <script src="https://www.paypal.com/sdk/js?client-id=AdiBAOcFH-KPKgHfypfVSJOIcbzWeQDMCNw7Z0zwUtgEz6cvGUY2miW1WZG9m4fsBdhKcLUafk4IkZXJ&vault=true&intent=subscription"></script>
+
+  <script>
+    let currentPlanId = "";
+
+    function selectPlan(planId, name, price) {
+      currentPlanId = planId;
+      
+      // Mostrar la sección de pago y ocultar los planes
+      document.querySelector('.pricing-container').style.display = 'none';
+      document.querySelector('.header-text').style.display = 'none';
+      const paypalSection = document.getElementById('paypal-section');
+      paypalSection.style.display = 'block';
+
+      document.getElementById('selected-plan-name').innerText = name;
+      document.getElementById('selected-plan-price').innerText = "$" + price + " USD / mes";
+
+      renderPaypalButtons(planId);
+    }
+
+    function renderPaypalButtons(planId) {
+      // Limpiar contenedor por si el usuario cambia de idea
+      document.getElementById('paypal-button-container').innerHTML = '';
+
+      paypal.Buttons({
+       style: {
+      shape: 'rect',
+      color: 'gold',
+      layout: 'vertical',
+      label: 'subscribe'
+    },
+        createSubscription: function(data, actions) {
+          return actions.subscription.create({ 'plan_id': planId });
+        },
+        onApprove: function(data, actions) {
+          alert('¡Suscripción exitosa! ID: ' + data.subscriptionID);
+          window.location.href = "/success?id=" + data.subscriptionID;
+        }
+      }).render('#paypal-button-container');
+    }
+  </script>
+</body>
+</html>
