@@ -1,10 +1,10 @@
 import { Injectable } from '@nestjs/common';
-import { Telegraf } from 'telegraf';
-import { Context } from 'telegraf/typings/context';
+import axios from 'axios';
 
 @Injectable()
 export class TelegramService {
-  private bot: Telegraf<Context>;
+  private readonly botToken: string;
+  private readonly apiUrl: string;
 
   constructor() {
     const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -12,169 +12,83 @@ export class TelegramService {
       throw new Error('TELEGRAM_BOT_TOKEN is required');
     }
 
-    this.bot = new Telegraf(token);
-    this.setupHandlers();
+    this.botToken = token;
+    this.apiUrl = `https://api.telegram.org/bot${this.botToken}`;
   }
 
   /**
-   * Configura los handlers del bot
+   * Envía un mensaje a un usuario de Telegram
    */
-  private setupHandlers() {
-    // Handler para el comando /start
-    this.bot.command('start', async (ctx) => {
-      const userId = ctx.from.id;
-      const firstName = ctx.from.first_name || 'Usuario';
-
-      await ctx.reply(
-        `¡Hola ${firstName}! 👋\n\n` +
-        `Bienvenido a nuestro bot. Aquí puedes acceder a contenido premium.\n\n` +
-        `Usa /premium para obtener acceso ilimitado.`,
-        {
-          reply_markup: {
-            inline_keyboard: [
-              [
-                {
-                  text: '👑 Ir a Premium',
-                  callback_data: 'go_premium',
-                },
-              ],
-            ],
-          },
-        },
-      );
-    });
-
-    // Handler para el comando /premium
-    this.bot.command('premium', async (ctx) => {
-      await this.sendPremiumButton(ctx);
-    });
-
-    // Handler para el comando /status
-    this.bot.command('status', async (ctx) => {
-      const isPremium = (ctx as any)?.session?.isPremium || false;
-      const status = isPremium ? '✅ Premium Activo' : '⚠️ Plan Gratuito';
-
-      await ctx.reply(`Tu estado actual: ${status}`);
-    });
-
-    // Handler para callbacks
-    this.bot.action('go_premium', async (ctx) => {
-      await this.sendPremiumButton(ctx);
-    });
-  }
-
-  /**
-   * Inicia el bot
-   */
-  async start() {
-    await this.bot.launch();
-    console.log('✅ Telegram bot started');
-  }
-
-  /**
-   * Detiene el bot
-   */
-  async stop() {
-    await this.bot.stop();
-  }
-
-  /**
-   * Obtiene la instancia del bot
-   */
-  getBot(): Telegraf<Context> {
-    return this.bot;
-  }
-
-  /**
-   * Envía un botón de suscripción premium
-   */
-  async sendPremiumButton(ctx: Context, chatId?: number) {
-    const telegramId = chatId || ctx.from?.id;
-    const subscriptionUrl = `${process.env.BASE_URL}/paypal/subscribe?tg_id=${telegramId}`;
-
-    await ctx.reply(
-      '🎁 Acceso Premium\n\n' +
-      '💰 $10 USD / mes\n' +
-      '✨ Contenido exclusivo\n' +
-      '⚡ Velocidad prioritaria\n' +
-      '🎯 Soporte prioritario\n\n' +
-      'Haz clic en el botón para suscribirte con PayPal',
-      {
-        reply_markup: {
-          inline_keyboard: [
-            [
-              {
-                text: '💳 Suscribirme con PayPal',
-                url: subscriptionUrl,
-              },
-            ],
-          ],
-        },
-      },
-    );
-  }
-
-  /**
-   * Envía un mensaje al usuario
-   */
-  async sendMessage(telegramId: number, text: string, keyboard?: any) {
+  async sendMessage(chatId: number, text: string, parseMode: 'HTML' | 'Markdown' = 'HTML'): Promise<void> {
     try {
-      await this.bot.telegram.sendMessage(telegramId, text, {
-        parse_mode: 'HTML',
-        reply_markup: keyboard,
+      await axios.post(`${this.apiUrl}/sendMessage`, {
+        chat_id: chatId,
+        text,
+        parse_mode: parseMode,
       });
+
+      console.log(`📤 Message sent to ${chatId}`);
     } catch (error: any) {
-      console.error(`Error sending message to ${telegramId}:`, error?.message);
+      console.error(`❌ Error sending message to ${chatId}:`, error?.response?.data || error?.message);
     }
   }
 
   /**
-   * Notifica al usuario que su suscripción se activó
+   * Envía un mensaje con botones inline
    */
-  async notifySubscriptionActivated(telegramId: number, planName: string = 'Premium') {
-    const message =
-      `✅ ¡Suscripción confirmada!\n\n` +
-      `🎉 Tu plan "${planName}" está ahora activo.\n` +
-      `🗓️ Se renovará automáticamente cada mes.\n\n` +
-      `¿Necesitas ayuda? Escribe /help`;
+  async sendMessageWithButtons(
+    chatId: number,
+    text: string,
+    buttons: Array<Array<{ text: string; url?: string; callback_data?: string }>>,
+    parseMode: 'HTML' | 'Markdown' = 'HTML',
+  ): Promise<void> {
+    try {
+      await axios.post(`${this.apiUrl}/sendMessage`, {
+        chat_id: chatId,
+        text,
+        parse_mode: parseMode,
+        reply_markup: {
+          inline_keyboard: buttons,
+        },
+      });
 
-    await this.sendMessage(telegramId, message);
+      console.log(`📤 Message with buttons sent to ${chatId}`);
+    } catch (error: any) {
+      console.error(`❌ Error sending message to ${chatId}:`, error?.response?.data || error?.message);
+    }
   }
 
   /**
-   * Notifica que la suscripción fue cancelada
+   * Envía una notificación de suscripción activada
    */
-  async notifySubscriptionCancelled(telegramId: number) {
-    const message =
-      `❌ Tu suscripción ha sido cancelada.\n\n` +
-      `Lamentamos verte partir. Si cambias de opinión, escribe /premium para reactivar.`;
+  async notifySubscriptionActivated(chatId: number, planName: string): Promise<void> {
+    const text = `✅ <b>¡Suscripción Activada!</b>\n\n` +
+      `Plan: ${planName}\n` +
+      `Tu acceso premium está ahora activo.\n\n` +
+      `¡Gracias por tu compra!`;
 
-    await this.sendMessage(telegramId, message);
+    await this.sendMessage(chatId, text);
   }
 
   /**
-   * Notifica que el pago falló
+   * Envía una notificación de pago fallido
    */
-  async notifyPaymentFailed(telegramId: number) {
-    const message =
-      `⚠️ Error en el pago\n\n` +
-      `No pudimos procesar tu pago. Intenta de nuevo.`;
+  async notifyPaymentFailed(chatId: number): Promise<void> {
+    const text = `❌ <b>Pago Fallido</b>\n\n` +
+      `No pudimos procesar tu pago.\n` +
+      `Por favor, intenta nuevamente o contacta a soporte.`;
 
-    await this.sendMessage(telegramId, message);
+    await this.sendMessage(chatId, text);
   }
 
   /**
-   * Envía información de ayuda
+   * Envía una notificación de suscripción cancelada
    */
-  async sendHelp(telegramId: number) {
-    const message =
-      `📚 Ayuda\n\n` +
-      `/start - Mostrar bienvenida\n` +
-      `/premium - Ver opciones premium\n` +
-      `/status - Ver tu estado de suscripción\n` +
-      `/help - Mostrar esta ayuda\n\n` +
-      `¿Problemas? Contacta a: @soporte`;
+  async notifySubscriptionCancelled(chatId: number): Promise<void> {
+    const text = `❌ <b>Suscripción Cancelada</b>\n\n` +
+      `Tu suscripción ha sido cancelada.\n` +
+      `Si fue un error, puedes reactivarla en cualquier momento.`;
 
-    await this.sendMessage(telegramId, message);
+    await this.sendMessage(chatId, text);
   }
 }

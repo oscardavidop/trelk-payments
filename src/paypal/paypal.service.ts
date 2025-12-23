@@ -1,6 +1,7 @@
 import { Injectable, HttpException, HttpStatus } from '@nestjs/common';
 import axios, { AxiosInstance } from 'axios';
 import { createHmac } from 'crypto';
+import { Client, Environment, LogLevel, OrdersController, SubscriptionsController } from '@paypal/paypal-server-sdk';
 
 @Injectable()
 export class PaypalService {
@@ -9,10 +10,25 @@ export class PaypalService {
   private tokenExpiry = new Date(0);
   private readonly clientId: string;
   private readonly clientSecret: string;
+  private readonly client: Client;
+  public readonly subscriptionsController: SubscriptionsController;
+  public readonly ordersController: OrdersController;
 
   constructor() {
     this.clientId = this.requireEnv('PAYPAL_CLIENT_ID');
     this.clientSecret = this.requireEnv('PAYPAL_CLIENT_SECRET');
+
+    this.client = new Client({
+      clientCredentialsAuthCredentials: {
+        oAuthClientId: "ASSliDYKV_oegv0sWN2MaF0mHMfQo6avfPYdYJhFu5O2tFv-bscGJm6xDLdBn0TJPvtUTI8o-9XJ2sJ_",
+        oAuthClientSecret: "EAAtAgMHvoHoxJTCChXNVJ7kM54ey96Mi9oVaCNWyo4ElrpPq5E1LzQlqhDxHyh1qK_jamYdywCou2VM"
+      },
+      timeout: 0,
+      environment: Environment.Sandbox
+    });
+
+    this.subscriptionsController = new SubscriptionsController(this.client);
+    this.ordersController = new OrdersController(this.client);
 
     const apiUrl =
       process.env.PAYPAL_MODE === 'sandbox'
@@ -21,9 +37,9 @@ export class PaypalService {
 
     this.axiosInstance = axios.create({
       baseURL: apiUrl,
-      auth: {
-        username: this.clientId,
-        password: this.clientSecret,
+      headers: {
+        'Content-Type': 'application/json',
+        // 'Authorization': `Bearer ${this.accessToken}`,
       },
     });
   }
@@ -43,22 +59,25 @@ export class PaypalService {
    * Obtiene el access token de PayPal
    */
   async getAccessToken(): Promise<string> {
-    if (this.accessToken && this.tokenExpiry && this.tokenExpiry > new Date()) {
-      return this.accessToken;
-    }
+
+    // if (this.accessToken && this.tokenExpiry && this.tokenExpiry > new Date()) {
+    //   return this.accessToken;
+    // }
 
     try {
-      const response = await this.axiosInstance.post('/v1/oauth2/token', 'grant_type=client_credentials', {
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-      });
+      //   const response = await this.axiosInstance.post('/v1/oauth2/token', 'grant_type=client_credentials', {
+      //     headers: {
+      //       'Content-Type': 'application/x-www-form-urlencoded',
+      //     },
+      //   });
 
-      this.accessToken = response.data.access_token;
-      this.tokenExpiry = new Date(Date.now() + response.data.expires_in * 1000 - 60000);
-
+      //   this.accessToken = response.data.access_token;
+      //   this.tokenExpiry = new Date(Date.now() + response.data.expires_in * 1000 - 60000);
+      const token = await this.client.clientCredentialsAuthManager.fetchToken()
+      this.accessToken = token.accessToken;
       return this.accessToken;
     } catch (error: any) {
+      console.error('Error getting PayPal access token:', error);
       throw new HttpException('Failed to get PayPal access token', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
@@ -274,16 +293,33 @@ export class PaypalService {
   /**
    * Verifica la firma de un webhook de PayPal
    */
-  async verifyWebhookSignature(webhookId: string, webhookEvent: any): Promise<boolean> {
+  async verifyWebhookSignature(
+    webhookId: string,
+    req: any,
+  ): Promise<boolean> {
     try {
       const token = await this.getAccessToken();
 
+      if (!req.rawBody) {
+        console.error('Missing rawBody');
+        return false;
+      }
+
+      const payload = {
+        auth_algo: req.headers['paypal-auth-algo'],
+        cert_url: req.headers['paypal-cert-url'],
+        transmission_id: req.headers['paypal-transmission-id'],
+        transmission_sig: req.headers['paypal-transmission-sig'],
+        transmission_time: req.headers['paypal-transmission-time'],
+        webhook_id: webhookId,
+        webhook_event: JSON.parse(req.rawBody), // 🔑 CLAVE
+      };
+
+      // console.log('Verifying webhook with payload:', payload);
+
       const response = await this.axiosInstance.post(
         '/v1/notifications/verify-webhook-signature',
-        {
-          webhook_id: webhookId,
-          webhook_event: webhookEvent,
-        },
+        payload,
         {
           headers: {
             Authorization: `Bearer ${token}`,
@@ -294,10 +330,14 @@ export class PaypalService {
 
       return response.data.verification_status === 'SUCCESS';
     } catch (error: any) {
-      console.error('Error verifying webhook signature:', error?.response?.data || error?.message);
+      console.error(
+        'Error verifying webhook signature:',
+        error?.response?.data || error?.message,
+      );
       return false;
     }
   }
+
 
   /**
    * Obtiene el ID de webhook del cliente (para verificación local)

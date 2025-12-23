@@ -1,26 +1,35 @@
 import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
-import { PaypalController } from './paypal.controller';
+import { MongooseModule } from '@nestjs/mongoose';
 import { PaypalModule } from './paypal/paypal.module';
-import { TelegramModule } from './telegram/telegram.module';
 import { SubscriptionModule } from './subscription/subscription.module';
-import { User, Subscription } from './database/entities';
+import { TelegramModule } from './telegram/telegram.module';
 import { AppController } from './app.controller';
+import * as dotenv from 'dotenv';
+
+dotenv.config();
 
 @Module({
   imports: [
-    TypeOrmModule.forRoot({
-      type: 'sqlite',
-      database: process.env.DATABASE_URL || 'data/app.db',
-      entities: [User, Subscription],
-      synchronize: true,
-      logging: process.env.NODE_ENV === 'development',
-    }),
-    TypeOrmModule.forFeature([User, Subscription]),
-    PaypalModule,
+    // DB payments: subscriptions, paypal events
+    MongooseModule.forRoot(
+      process.env.MONGODB_URI || 'mongodb+srv://botmaria95:odop1712@cluster0.zt2kped.mongodb.net/',
+      {
+        dbName: 'payments',
+        connectionName: 'payments',
+      }
+    ),
+    // DB mbot: users
+    MongooseModule.forRoot(
+      process.env.MONGODB_URI || 'mongodb+srv://botmaria95:odop1712@cluster0.zt2kped.mongodb.net/',
+      {
+        dbName: 'mbot',
+        connectionName: 'mbot',
+      }
+    ),
     TelegramModule,
+    PaypalModule,
     SubscriptionModule,
   ],
-  controllers: [PaypalController, AppController],
+  controllers: [AppController],
 })
-export class AppModule {}
+export class AppModule { }
