@@ -33,44 +33,94 @@ import { Document, Types } from 'mongoose';
 // }
 @Schema({ timestamps: true })
 export class Subscription extends Document {
-    @Prop({ required: true, unique: true, index: true })
-    id: string;
 
-    @Prop({ required: true })
+    // 🔑 PayPal
+    @Prop({ required: true, unique: true, index: true })
+    paypal_subscription_id: string;
+
+    @Prop({ required: true, index: true })
     plan_id: string;
 
-    @Prop({ required: true })
-    start_time: string;
+    @Prop()
+    start_time?: string;
 
-    @Prop({ required: true })
-    quantity: string;
+    @Prop()
+    quantity?: string;
 
-    @Prop({ type: String, enum: ['APPROVAL_PENDING', 'ACTIVE', 'SUSPENDED', 'CANCELLED', 'EXPIRED', 'PENDING_ASSOCIATION'], default: 'APPROVAL_PENDING' })
-    status: 'APPROVAL_PENDING' | 'ACTIVE' | 'SUSPENDED' | 'CANCELLED' | 'EXPIRED' | 'PENDING_ASSOCIATION';
+    // 📌 Estado
+    @Prop({
+        type: String,
+        enum: [
+            'APPROVAL_PENDING',
+            'PENDING_ASSOCIATION',
+            'ACTIVE',
+            'SUSPENDED',
+            'CANCELLED',
+            'EXPIRED'
+        ],
+        default: 'APPROVAL_PENDING',
+        index: true
+    })
+    status:
+        | 'APPROVAL_PENDING'
+        | 'PENDING_ASSOCIATION'
+        | 'ACTIVE'
+        | 'SUSPENDED'
+        | 'CANCELLED'
+        | 'EXPIRED';
 
-    @Prop({ type: String, sparse: true })
+    // 💳 Pago
+    @Prop({ sparse: true })
     paypal_payerId?: string;
 
-    @Prop({ type: Number, required: false })
-    amount: number;
+    @Prop()
+    amount?: number;
 
-    @Prop({ type: String, required: false })
-    currency: string;
+    @Prop()
+    currency?: string;
 
-    @Prop({ type: Date, sparse: false })
-    next_billing_date?: string;
+    @Prop()
+    next_billing_date?: Date;
 
-    @Prop({ type: Date, sparse: false })
+    @Prop()
     cancelledAt?: Date;
 
-    @Prop({ type: Types.ObjectId, ref: 'User', required: false })
-    user: Types.ObjectId;
+    // 👤 Usuario (deprecated, usar user_id)
+    @Prop({ type: Types.ObjectId, ref: 'User' })
+    user?: Types.ObjectId;
 
-    @Prop({ type: String, sparse: true })
+    // Telegram / external ID
+    @Prop({ sparse: true, index: true })
     user_id?: string;
+
+    // 🔔 Idempotencia
+    @Prop({ default: false, index: true }) // FIX: Índice para queries atómicos
+    activation_notified?: boolean;
+
+    @Prop({ type: Boolean, default: false, index: true }) // FIX: Índice para queries atómicos
+    features_applied?: boolean;
+
+    @Prop({ type: Boolean, default: false })
+    invalid_signature?: boolean;
 
     createdAt?: Date;
     updatedAt?: Date;
 }
 
 export const SubscriptionSchema = SchemaFactory.createForClass(Subscription);
+
+// Índices para atomicidad y performance en operaciones críticas
+SubscriptionSchema.index({
+    paypal_subscription_id: 1,
+    status: 1,
+    features_applied: 1
+});
+
+SubscriptionSchema.index({
+    paypal_subscription_id: 1,
+    user_id: 1
+});
+
+SubscriptionSchema.index({ user_id: 1, status: 1 });
+SubscriptionSchema.index({ plan_id: 1 });
+SubscriptionSchema.index({ status: 1 });

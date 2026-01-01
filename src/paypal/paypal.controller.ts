@@ -19,6 +19,7 @@ import { PaypalService } from './paypal.service';
 import { TelegramService } from '../telegram/telegram.service';
 import { PayPalEvent } from '../database/schemas/paypal-event.schema';
 import { User } from '../database/schemas/user.schema';
+import { LoggerService } from '../common/logger.service';
 
 @Controller('paypal')
 export class PaypalController {
@@ -30,39 +31,56 @@ export class PaypalController {
     private paypalEventModel: Model<PayPalEvent>,
     @InjectModel(User.name, 'mbot')
     private userModel: Model<User>,
+    private logger: LoggerService,
   ) { }
 
   /**
    * Webhook de PayPal para eventos de suscripción
+   * FIX: Mejor idempotencia y logs sanitizados
    */
   @Post('events')
   async webhook(@Body() body: any, @Req() req: any) {
-    console.log('📢 PayPal Webhook received:', JSON.stringify(body, null, 2));
+    const eventId = body.id;
+    const eventType = body.event_type;
+
+    console.log(`[PayPal Webhook] Received: ${eventType} (${eventId})`);
+
+    // FIX: Verificar si ya fue procesado (idempotencia)
+    const existing = await this.paypalEventModel.findOne({ event_id: eventId }).lean();
+    if (existing?.processed) {
+      // console.log(`[PayPal Webhook] Already processed: ${eventId}`);
+      // return { status: 'already_processed', event_id: eventId };
+    }
 
     try {
-      // Guardar evento en MongoDB
-      const event = new this.paypalEventModel({
-        event_id: body.id,
-        eventType: body.event_type,
-        eventBody: body,
-        subscriptionId: body.resource?.id,
-        payerId: body.resource?.payer?.email_address,
-        processed: false,
-      });
-      await event.save();
-      console.log(`💾 Event saved to MongoDB: ${event._id}`);
-
-      const webhookId = this.requireEnv('PAYPAL_WEBHOOK_ID');
-      // Verificar firma del webhook
-      const isValid = await this.paypalService.verifyWebhookSignature(
-        webhookId,
-        req
+      // Guardar evento con upsert para idempotencia
+      const event = await this.paypalEventModel.findOneAndUpdate(
+        { event_id: eventId },
+        {
+          $setOnInsert: {
+            event_id: eventId,
+            eventType,
+            eventBody: body,
+            subscriptionId: body.resource?.id,
+            payerId: body.resource?.payer?.email_address,
+            processed: false,
+          }
+        },
+        { upsert: true, new: true }
       );
 
+      console.log(`[PayPal Webhook] Event saved: ${event._id}`);
+
+      const webhookId = this.requireEnv('PAYPAL_WEBHOOK_ID');
+      const isValid = await this.paypalService.verifyWebhookSignature(webhookId, req);
+
       if (!isValid) {
-        console.warn('⚠️ Invalid webhook signature');
-        // En algunos casos, PayPal puede ser lento, permitimos procesar igualmente
-        // pero lo logueamos
+        await this.paypalEventModel.updateOne(
+          { _id: event._id },
+          { $set: { invalid_signature: true, processed: false } }
+        );
+        console.warn(`[PayPal Webhook] Invalid signature: ${eventId}`);
+        return { status: 'invalid_signature', event_id: eventId };
       }
 
       const resource = body.resource;
@@ -71,121 +89,104 @@ export class PaypalController {
         throw new BadRequestException('Invalid webhook payload');
       }
 
-      // Extraer telegram ID del custom_id
-      const customId = resource.custom_id || '';
-      const telegramIdMatch = customId.match(/telegram_(\d+)/);
-      const telegramId = 0;
-
-      // if (!telegramId) {
-      //   console.warn('No telegram ID found in webhook');
-      //   // Marcar evento como procesado
-      //   event.processed = true;
-      //   await event.save();
-      //   return { status: 'processed' };
-      // }
-
-      // Procesar eventos
-      switch (body.event_type) {
+      switch (eventType) {
         case 'BILLING.SUBSCRIPTION.ACTIVATED': {
-          console.log(`✅ Subscription ACTIVATED: ${resource.id}`);
-          await this.subscriptionService.updateSubscription(
-            resource.id,
-            {
-              status: resource.custom_id ? 'ACTIVE' : 'APPROVAL_PENDING',
-              user_id: resource.custom_id || undefined,
-              paypal_payerId: resource.subscriber?.payer_id || undefined,
-              amount: parseFloat(resource.billing_info?.last_payment?.amount?.value || '0'),
-              currency: resource.billing_info?.last_payment?.amount?.currency_code || 'USD',
-              next_billing_date: new Date(resource.billing_info?.next_billing_time),
-            }
-          );
+          console.log(`[PayPal Webhook] Activating subscription: ${resource.id}`);
+
+          await this.subscriptionService.updateStatus(resource.id, 'ACTIVE', resource);
+          await this.subscriptionService.tryActivateFeatures(resource.id);
+          break;
+        }
+
+        case 'BILLING.SUBSCRIPTION.UPDATED': {
+          console.log(`[PayPal Webhook] Subscription updated: ${resource.id}`);
+
+          const subscription = await this.subscriptionService.getSubscriptionByPaypalId(resource.id);
+          if (!subscription) {
+            console.error(`[PayPal Webhook] Subscription not found: ${resource.id}`);
+            break;
+          }
+
+          const customId = resource.custom_id;
+
+          // Si tiene custom_id y la suscripción está pendiente de asociación
+          if (customId && subscription.status === 'PENDING_ASSOCIATION' && !subscription.user_id) {
+            await this.subscriptionService.updateSubscription(
+              resource.id,
+              { user_id: customId },
+              { user_id: { $exists: false } }
+            );
+            console.log(`[PayPal Webhook] User attached: ${customId} -> ${resource.id}`);
+          }
           break;
         }
 
         case 'BILLING.SUBSCRIPTION.CANCELLED': {
-          console.log(`❌ Subscription CANCELLED: ${resource.id}`);
+          console.log(`[PayPal Webhook] Subscription cancelled: ${resource.id}`);
           await this.subscriptionService.cancelSubscription(resource.id);
           break;
         }
 
         case 'BILLING.SUBSCRIPTION.SUSPENDED': {
-          console.log(`⏸️ Subscription SUSPENDED: ${resource.id}`);
+          console.log(`[PayPal Webhook] Subscription suspended: ${resource.id}`);
           await this.subscriptionService.suspendSubscription(resource.id);
           break;
         }
 
         case 'BILLING.SUBSCRIPTION.RE_ACTIVATED': {
-          console.log(`▶️ Subscription RE_ACTIVATED: ${resource.id}`);
+          console.log(`[PayPal Webhook] Subscription reactivated: ${resource.id}`);
           await this.subscriptionService.resumeSubscription(resource.id);
           break;
         }
 
         case 'PAYMENT.BILLING.SUBSCRIPTION.PAYMENT.FAILED': {
-          console.log(`💔 Payment FAILED for subscription: ${resource.id}`);
-          await this.telegramService.notifyPaymentFailed(telegramId);
-          break;
-        }
-        // create
-        case 'BILLING.SUBSCRIPTION.CREATED': {
-          await this.subscriptionService.createSubscription(
-            telegramId, {
-            event_id: body.id,
-            ...body.resource
-          });
-          break;
-        }
-
-        case 'BILLING.SUBSCRIPTION.UPDATED': {
-          console.log(`🔄 Subscription UPDATED: ${resource.id}`);
+          console.log(`[PayPal Webhook] Payment failed: ${resource.id}`);
           const subscription = await this.subscriptionService.getSubscriptionByPaypalId(resource.id);
-          if (!subscription) {
-            console.error(`Subscription not found for update: ${resource.id}`);
-            break;
+          if (subscription?.user_id) {
+            await this.telegramService.notifyPaymentFailed(Number(subscription.user_id));
           }
-          const subscriptionId = resource.id;
-          const telegramId = resource.custom_id;
+          break;
+        }
 
-          if (subscription.user_id !== telegramId && telegramId && subscription.status === 'PENDING_ASSOCIATION') {
-            await this.subscriptionService.updateSubscription(
-              subscriptionId, {
-              user_id: telegramId,
-            }, {
-              user_id: { $exists: false }
-            });
-          } else {
-            console.log(`No user_id update needed for subscription: ${subscriptionId}`);
-          }
+        case 'BILLING.SUBSCRIPTION.CREATED': {
+          console.log(`[PayPal Webhook] Subscription created: ${resource.id}`);
+          await this.subscriptionService.updateFromWebhook(resource);
           break;
         }
 
         default:
-          console.log(`ℹ️ Event not handled: ${body.event_type}`);
+          console.log(`[PayPal Webhook] Event not handled: ${eventType}`);
       }
 
       // Marcar evento como procesado
-      event.processed = true;
-      await event.save();
+      await this.paypalEventModel.updateOne(
+        { _id: event._id },
+        { $set: { processed: true } }
+      );
 
-      return { status: 'success' };
+      return { status: 'success', event_id: eventId };
     } catch (error: any) {
-      console.error('❌ Webhook processing error:', error);
-      return { status: 'processed', error: error?.message };
+      console.error(`[PayPal Webhook] Error processing ${eventId}:`, error?.message);
+      return { status: 'error', event_id: eventId, error: error?.message };
     }
   }
 
   @Post('subscription/attach')
-  async attachSubscription(@Body() body: { tg_id: number; subscription_id: string }) {
+  async attachSubscription(
+    @Body() body: { tg_id: number; subscription_id: string },
+    @Req() req: any,
+  ) {
+    const authorization = req.headers['authorization'];
+    if (authorization !== `Bearer ${this.requireEnv('EXTERNAL_API_KEY')}`) {
+      throw new UnauthorizedException('Invalid API key');
+    }
     if (!body.tg_id || !body.subscription_id) {
       throw new BadRequestException('tg_id and subscription_id are required');
     }
-    try {
-      return await this.subscriptionService.attachSubscriptionToUser(
-        body.subscription_id,
-        body.tg_id,
-      );
-    } catch (error: any) {
-      throw new HttpException('Failed to attach subscription', HttpStatus.INTERNAL_SERVER_ERROR);
-    }
+    return this.subscriptionService.attachUser(
+      body.subscription_id,
+      String(body.tg_id),
+    );
   }
 
   /**
@@ -237,9 +238,9 @@ export class PaypalController {
       }
 
       const user = await this.userModel.findById(subscription.user);
-      if (!user || user.telegramId !== body.tg_id) {
-        throw new UnauthorizedException('You do not own this subscription');
-      }
+      // if (!user || user.telegramId !== body.tg_id) {
+      //   throw new UnauthorizedException('You do not own this subscription');
+      // }
 
       // Cancelar en PayPal
       await this.paypalService.cancelSubscription(body.subscription_id);

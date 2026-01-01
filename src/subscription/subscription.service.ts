@@ -1,10 +1,12 @@
-import { Injectable } from '@nestjs/common';
+import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { User } from '../database/schemas/user.schema';
 import { Subscription } from '../database/schemas/subscription.schema';
 import { PaypalService } from '../paypal/paypal.service';
 import { TelegramService } from '../telegram/telegram.service';
+import { Plan } from '../database/schemas/plan.schema';
+import { LoggerService } from '../common/logger.service';
 
 @Injectable()
 export class SubscriptionService {
@@ -13,19 +15,23 @@ export class SubscriptionService {
     private userModel: Model<User>,
     @InjectModel(Subscription.name, 'payments')
     private subscriptionModel: Model<Subscription>,
+    @InjectModel(Plan.name, 'payments')
+    private planModel: Model<Plan>,
     private paypalService: PaypalService,
     private telegramService: TelegramService,
+    private logger: LoggerService,
   ) { }
 
   /**
    * Obtiene o crea un usuario por telegram ID
+   * FIX: Usa 'id' en lugar de 'telegramId' para consistencia con schema
    */
   async getOrCreateUser(telegramId: number, userData?: any): Promise<User> {
-    let user = await this.userModel.findOne({ id: telegramId });
+    let user = await this.userModel.findOne({ id: telegramId }).lean() as unknown as User;
 
     if (!user) {
-      user = new this.userModel({
-        telegramId,
+      const newUser = new this.userModel({
+        id: telegramId,
         telegramUsername: userData?.username,
         firstName: userData?.first_name,
         lastName: userData?.last_name,
@@ -34,7 +40,8 @@ export class SubscriptionService {
         subscriptions: [],
       });
 
-      await user.save();
+      user = await newUser.save();
+      this.logger.info(`User created: ${telegramId}`);
     }
 
     return user;
@@ -44,160 +51,452 @@ export class SubscriptionService {
    * Obtiene un usuario por telegram ID
    */
   async getUserByTelegramId(telegramId: number): Promise<User | null> {
-    return this.userModel.findOne({ telegramId }).populate('subscriptions');
+    return this.userModel.findOne({ id: telegramId }).lean() as unknown as User | null;
   }
 
   /**
    * Obtiene una suscripción por ID de PayPal
+   * FIX: Query correcto con paypal_subscription_id
    */
   async getSubscriptionByPaypalId(paypalSubscriptionId: string): Promise<Subscription | null> {
-    return this.subscriptionModel.findOne({ id: paypalSubscriptionId }).populate('user');
-  }
-
-  /**
-   * Activa una suscripción
-   */
-  async activateSubscription(
-    subscriptionId: string
-  ): Promise<void> {
-    const subscription = await this.subscriptionModel
-      .findOne({ id: subscriptionId })
-      .populate('user');
-
-    if (!subscription) {
-      console.error(`Subscription not found: ${subscriptionId}`);
-      return;
-    }
-
-    console.log(`Activating subscription ${subscriptionId}...`, subscription);
-
-    
-
-    // Actualizar usuario
-    // const user = await this.userModel.findById(subscription.user);
-    // if (user) {
-    //   user.isPremium = true;
-    //   user.tier = 'premium';
-    //   user.paypalPayerId = paypalPayerId;
-    //   await user.save();
-
-    //   // Notificar al usuario
-    //   await this.telegramService.sendMessage(user.telegramId, '✅ ¡Suscripción activada! Ahora tienes acceso Premium.');
-    // }
-
-    // console.log(`✅ Subscription activated for user ${(subscription.user as any).telegramId}: ${subscriptionId}`);
+    return this.subscriptionModel.findOne({ paypal_subscription_id: paypalSubscriptionId }).lean() as unknown as Subscription | null;
   }
 
   /**
    * Cancela una suscripción
+   * FIX: Ahora actualiza correctamente el usuario y limpia pro_features
    */
   async cancelSubscription(subscriptionId: string): Promise<void> {
     const subscription = await this.subscriptionModel
-      .findOne({ paypalSubscriptionId: subscriptionId })
-      .populate('user');
+      .findOne({ paypal_subscription_id: subscriptionId })
+      .lean() as unknown as Subscription;
 
     if (!subscription) {
-      console.error(`Subscription not found: ${subscriptionId}`);
+      this.logger.warn(`Subscription not found: ${subscriptionId}`);
       return;
     }
 
-    // Actualizar suscripción
-    subscription.status = 'CANCELLED';
-    subscription.cancelledAt = new Date();
-
-    await subscription.save();
-
-    // Actualizar usuario
-    const user = await this.userModel.findById(subscription.user);
-    if (user) {
-      user.isPremium = false;
-      user.tier = 'free';
-      await user.save();
-
-      // Notificar al usuario
-      await this.telegramService.sendMessage(user.telegramId, '❌ Tu suscripción ha sido cancelada.');
+    if (subscription.status === 'CANCELLED') {
+      this.logger.info(`Subscription already cancelled: ${subscriptionId}`);
+      return;
     }
 
-    console.log(`❌ Subscription cancelled for user ${(subscription.user as any).telegramId}: ${subscriptionId}`);
+    // Actualizar suscripción atómicamente
+    await this.subscriptionModel.updateOne(
+      { paypal_subscription_id: subscriptionId },
+      {
+        $set: {
+          status: 'CANCELLED',
+          cancelledAt: new Date(),
+        }
+      }
+    );
+
+    // Limpiar features del usuario si existe
+    if (subscription.user_id) {
+      const user = await this.userModel.findOne({ id: Number(subscription.user_id) });
+
+      if (user) {
+        user.is_pro = false;
+        user.pro_features = {};
+        await user.save();
+
+        this.logger.info(`User ${subscription.user_id} downgraded to free tier`);
+      }
+
+      // Notificar usuario
+      await this.telegramService.sendMessage(
+        Number(subscription.user_id),
+        '❌ Tu suscripción ha sido cancelada.'
+      ).catch(err => this.logger.error('Failed to notify user', err));
+    }
+
+    this.logger.info(`Subscription cancelled: ${subscriptionId}`);
   }
 
   /**
    * Suspende una suscripción
+   * FIX: Query correcto y limpieza de código
    */
   async suspendSubscription(subscriptionId: string): Promise<void> {
-    const subscription = await this.subscriptionModel
-      .findOne({ paypalSubscriptionId: subscriptionId })
-      .populate('user');
+    const subscription = await this.subscriptionModel.findOneAndUpdate(
+      { paypal_subscription_id: subscriptionId },
+      { $set: { status: 'SUSPENDED' } },
+      { new: true }
+    );
 
     if (!subscription) {
+      this.logger.warn(`Subscription not found for suspend: ${subscriptionId}`);
       return;
     }
 
-    subscription.status = 'SUSPENDED';
-    await subscription.save();
+    // Downgrade usuario temporalmente
+    if (subscription.user_id) {
+      await this.userModel.updateOne(
+        { id: Number(subscription.user_id) },
+        { $set: { is_pro: false } }
+      );
 
-    const user = await this.userModel.findById(subscription.user);
-    if (user) {
-      user.isPremium = false;
-      await user.save();
-
-      await this.telegramService.sendMessage(user.telegramId, '⏸️ Tu suscripción ha sido suspendida.');
+      await this.telegramService.sendMessage(
+        Number(subscription.user_id),
+        '⏸️ Tu suscripción ha sido suspendida.'
+      ).catch(err => this.logger.error('Failed to notify user', err));
     }
 
-    console.log(`⏸️ Subscription suspended for user ${(subscription.user as any).telegramId}: ${subscriptionId}`);
+    this.logger.info(`Subscription suspended: ${subscriptionId}`);
   }
 
   /**
    * Reanuda una suscripción
+   * FIX: Validación con PayPal y actualización consistente
    */
   async resumeSubscription(subscriptionId: string): Promise<void> {
-    const subscription = await this.subscriptionModel
-      .findOne({ paypalSubscriptionId: subscriptionId })
-      .populate('user');
+    // Validar con PayPal primero
+    const paypalSub = await this.paypalService.getSubscription(subscriptionId);
 
-    if (!subscription) {
+    if (paypalSub.status !== 'ACTIVE') {
+      this.logger.warn(`PayPal subscription not active: ${subscriptionId}, status: ${paypalSub.status}`);
       return;
     }
 
-    // Validar con PayPal
-    const paypalSub = await this.paypalService.getSubscription(subscriptionId);
+    const subscription = await this.subscriptionModel.findOneAndUpdate(
+      { paypal_subscription_id: subscriptionId },
+      { $set: { status: 'ACTIVE' } },
+      { new: true }
+    );
 
-    if (paypalSub.status === 'ACTIVE') {
-      subscription.status = 'ACTIVE';
-      await subscription.save();
+    if (!subscription) {
+      this.logger.warn(`Subscription not found for resume: ${subscriptionId}`);
+      return;
+    }
 
-      const user = await this.userModel.findById(subscription.user);
-      if (user) {
-        user.isPremium = true;
-        await user.save();
+    // Reactivar usuario
+    if (subscription.user_id) {
+      await this.userModel.updateOne(
+        { id: Number(subscription.user_id) },
+        { $set: { is_pro: true } }
+      );
 
-        await this.telegramService.sendMessage(user.telegramId, '▶️ Tu suscripción ha sido reactivada.');
+      await this.telegramService.sendMessage(
+        Number(subscription.user_id),
+        '▶️ Tu suscripción ha sido reactivada.'
+      ).catch(err => this.logger.error('Failed to notify user', err));
+    }
+
+    this.logger.info(`Subscription resumed: ${subscriptionId}`);
+  }
+
+  /**
+   * Crea una nueva suscripción
+   */
+  async createSubscription(data: any): Promise<Subscription> {
+    const subscription = new this.subscriptionModel(data);
+    await subscription.save();
+    return subscription;
+  }
+
+  /**
+   * Crea o retorna suscripción existente (idempotente)
+   */
+  async createSubscriptionIfNotExists(data: any): Promise<Subscription> {
+    let subscription = await this.subscriptionModel
+      .findOne({ paypal_subscription_id: data.paypal_subscription_id })
+      .lean() as unknown as Subscription;
+
+    if (!subscription) {
+      const newSub = new this.subscriptionModel(data);
+      subscription = await newSub.save();
+      this.logger.info(`Subscription created: ${data.paypal_subscription_id}`);
+    }
+
+    return subscription as Subscription;
+  }
+
+  /**
+   * Actualiza o crea suscripción desde webhook
+   * IDEMPOTENTE: Usa upsert con $setOnInsert
+   */
+  async updateFromWebhook(resource: any): Promise<Subscription | null> {
+    if (!resource?.id) {
+      this.logger.warn('Webhook without subscription id, ignored');
+      return null;
+    }
+
+    const status = resource.status === 'ACTIVE' ? 'ACTIVE' : 'APPROVAL_PENDING';
+
+    const subscription = await this.subscriptionModel.findOneAndUpdate(
+      { paypal_subscription_id: resource.id },
+      {
+        $setOnInsert: {
+          paypal_subscription_id: resource.id,
+          plan_id: resource.plan_id,
+          createdAt: new Date(),
+        },
+        $set: {
+          start_time: resource.start_time,
+          quantity: resource.quantity,
+          status,
+        },
+      },
+      {
+        new: true,
+        upsert: true,
+      }
+    );
+
+    this.logger.info(`Subscription upserted from webhook: ${resource.id}, status: ${status}`);
+    return subscription;
+  }
+  /**
+   * Asocia una suscripción a un usuario (Telegram ID)
+   * CRÍTICO: Operación ATÓMICA para prevenir race conditions
+   * 
+   * Flujo:
+   * 1. Valida que el usuario exista
+   * 2. Intenta asociar SOLO si no tiene user_id (previene doble attach)
+   * 3. Si ya está activa, intenta activar features automáticamente
+   * 
+   * @throws ConflictException si ya está asociada a un usuario
+   * @throws NotFoundException si el usuario no existe
+   */
+  async attachUser(
+    paypalSubscriptionId: string,
+    userId: string,
+  ): Promise<Subscription> {
+    // Validar que el usuario existe
+    const user = await this.userModel.findOne({ id: Number(userId) }).lean() as unknown as User;
+    if (!user) {
+      throw new NotFoundException(`User not found: ${userId}`);
+    }
+
+    // Operación ATÓMICA: solo actualiza si NO tiene user_id
+    const subscription = await this.subscriptionModel.findOneAndUpdate(
+      {
+        paypal_subscription_id: paypalSubscriptionId,
+        user_id: { $exists: false } // CRÍTICO: previene doble attach
+      },
+      {
+        $set: { user_id: userId },
+        $setOnInsert: {
+          paypal_subscription_id: paypalSubscriptionId,
+          status: 'PENDING_ASSOCIATION',
+          createdAt: new Date(),
+        }
+      },
+      {
+        new: true,
+        upsert: false // NO crear si no existe
+      }
+    );
+
+    if (!subscription) {
+      // Verificar si ya estaba asociada
+      const existing = await this.subscriptionModel
+        .findOne({ paypal_subscription_id: paypalSubscriptionId })
+        .lean() as unknown as Subscription;
+
+      if (existing?.user_id) {
+        throw new ConflictException(
+          `Subscription ${paypalSubscriptionId} is already attached`
+        );
       }
 
-      console.log(`▶️ Subscription resumed for user ${(subscription.user as any).telegramId}: ${subscriptionId}`);
+      throw new NotFoundException(`Subscription not found: ${paypalSubscriptionId}`);
+    }
+
+    this.logger.info(`Subscription ${paypalSubscriptionId} attached to user ${userId}`);
+
+    // Si ya está ACTIVE, intentar activar features automáticamente
+    if (subscription.status === 'ACTIVE' && !subscription.features_applied) {
+      this.logger.info(`Subscription already ACTIVE, triggering feature activation`);
+      // Ejecutar en background para no bloquear la respuesta
+      setImmediate(() => {
+        this.tryActivateFeatures(paypalSubscriptionId).catch(err =>
+          this.logger.error(`Failed to auto-activate features for ${paypalSubscriptionId}`, err)
+        );
+      });
+    }
+
+    return subscription;
+  }
+
+  /**
+   * Activa features premium para una suscripción
+   * OPERACIÓN IDEMPOTENTE Y ATÓMICA
+   * 
+   * Previene:
+   * - Doble activación (race condition entre webhooks)
+   * - Stack overflow (serialización segura de plan.features)
+   * - Inconsistencia User/Subscription
+   * 
+   * Solo ejecuta si:
+   * - status === 'ACTIVE'
+   * - user_id existe
+   * - features_applied === false
+   * 
+   * Marca features_applied en la MISMA operación atómica
+   */
+  async tryActivateFeatures(subscriptionId: string): Promise<void> {
+    // OPERACIÓN ATÓMICA: solo actualiza UNA VEZ
+    const subscription = await this.subscriptionModel.findOneAndUpdate(
+      {
+        paypal_subscription_id: subscriptionId,
+        status: 'ACTIVE',
+        user_id: { $exists: true },
+        features_applied: false // CRÍTICO: solo si no ha sido aplicado
+      },
+      {
+        $set: {
+          features_applied: true,
+          activation_notified: true
+        }
+      },
+      { new: false } // Retorna el documento ANTES del update
+    );
+
+    // Si no hay documento, ya fue activado por otro proceso
+    if (!subscription) {
+      this.logger.info(`Feature activation skipped (already applied or not ready): ${subscriptionId}`);
+      return;
+    }
+
+    this.logger.info(`Activating features for subscription: ${subscriptionId}`);
+
+    try {
+      // Buscar usuario
+      const user = await this.userModel.findOne({ id: Number(subscription.user_id) });
+      if (!user) {
+        this.logger.error(`User not found for subscription ${subscriptionId}: ${subscription.user_id}`);
+        // Rollback flag si falla
+        await this.subscriptionModel.updateOne(
+          { paypal_subscription_id: subscriptionId },
+          { $set: { features_applied: false, activation_notified: false } }
+        );
+        return;
+      }
+
+      // Buscar plan con LEAN para evitar objetos Mongoose circulares
+      const plan = await this.planModel.findOne({ plan_id: subscription.plan_id }).lean() as any;
+      if (!plan) {
+        this.logger.error(`Plan not found for subscription ${subscriptionId}: ${subscription.plan_id}`);
+        // Rollback flag si falla
+        await this.subscriptionModel.updateOne(
+          { paypal_subscription_id: subscriptionId },
+          { $set: { features_applied: false, activation_notified: false } }
+        );
+        return;
+      }
+
+      // CRÍTICO: Serialización segura de plan.features
+      // Evita stack overflow por objetos circulares Mongoose
+      const safeFeatures = JSON.parse(JSON.stringify(plan.features));
+
+      // Aplicar features al usuario
+      user.pro_features = {
+        ...safeFeatures,
+        subscription: {
+          tier: plan.name,
+          paypal_subscription_id: subscription.paypal_subscription_id,
+          started_at: new Date(),
+          expires_at: subscription.next_billing_date || null,
+          auto_renew: true,
+          interval: 30,
+          active: true,
+          price: plan.price,
+        },
+      };
+      user.is_pro = true;
+
+      await user.save();
+
+      this.logger.info(`Features activated for user ${subscription.user_id}, plan: ${plan.name}`);
+
+      // Notificar usuario
+      await this.telegramService.sendMessage(
+        Number(subscription.user_id),
+        `✅ Tu suscripción a ${plan.name.toUpperCase()} ha sido activada. ¡Disfruta de las funciones premium!`
+      ).catch(err => this.logger.error('Failed to notify user', err));
+
+    } catch (error) {
+      this.logger.error(`Failed to activate features for ${subscriptionId}`, error);
+
+      // Rollback flag para permitir retry
+      await this.subscriptionModel.updateOne(
+        { paypal_subscription_id: subscriptionId },
+        { $set: { features_applied: false, activation_notified: false } }
+      );
+
+      throw error;
     }
   }
 
   /**
-   * Crea una nueva suscripción (después de que PayPal aprueba)
+   * Actualiza el estado de una suscripción
+   * FIX: No sobrescribe plan_id si es undefined
    */
-  async createSubscription(
-    telegramId: number,
-    data: any,
-  ): Promise<Subscription> {
-    // const user = await this.getOrCreateUser(telegramId);
+  async updateStatus(
+    paypalSubscriptionId: string,
+    newStatus: 'ACTIVE' | 'SUSPENDED' | 'CANCELLED' | 'EXPIRED',
+    resource?: any,
+  ): Promise<Subscription | null> {
+    const update: any = { status: newStatus };
 
-    const subscription = new this.subscriptionModel({
-      user_id: telegramId,
-      ...data
-    });
+    // Datos financieros solo si existen
+    if (resource?.billing_info?.last_payment) {
+      const amount = parseFloat(resource.billing_info.last_payment.amount?.value || '0');
+      if (amount > 0) {
+        update.amount = amount;
+        update.currency = resource.billing_info.last_payment.amount?.currency_code || 'USD';
+      }
+    }
 
-    await subscription.save();
+    if (resource?.billing_info?.next_billing_time) {
+      update.next_billing_date = new Date(resource.billing_info.next_billing_time);
+    }
 
-    // Agregar subscription al usuario
-    // user.subscriptions.push(subscription._id);
-    // await user.save();
+    if (resource?.subscriber?.payer_id) {
+      update.paypal_payerId = resource.subscriber.payer_id;
+    }
 
+    // Solo actualizar plan_id si viene en el resource
+    if (resource?.plan_id) {
+      update.plan_id = resource.plan_id;
+    }
+
+    // Fecha de cancelación
+    if (newStatus === 'CANCELLED') {
+      update.cancelledAt = new Date();
+    }
+
+    // Solo resetear features_applied si cambia a ACTIVE desde otro estado
+    // Previene reseteo innecesario que podría causar doble activación
+    let subscription = await this.subscriptionModel.findOneAndUpdate(
+      { paypal_subscription_id: paypalSubscriptionId },
+      { $set: update },
+      { new: true }
+    );
+
+    if (!subscription) {
+      this.logger.warn(`updateStatus: subscription not found ${paypalSubscriptionId}, creating a new one`);
+      this.logger.info(`Creating new subscription record for ${paypalSubscriptionId} with status ${newStatus}`);
+      try {
+        subscription = await this.subscriptionModel.create({
+          paypal_subscription_id: paypalSubscriptionId,
+          status: newStatus,
+          next_billing_date: update.next_billing_date,
+          amount: update.amount,
+          currency: update.currency,
+          plan_id: resource?.plan_id || 'unknown',
+          paypal_payerId: update.paypal_payerId,
+          createdAt: new Date(),
+        });
+      } catch (error) {
+        this.logger.error(`Failed to create subscription ${paypalSubscriptionId}`, error);
+        throw error;
+      }
+    }
+
+    this.logger.info(`Subscription status updated: ${paypalSubscriptionId} -> ${newStatus}`);
     return subscription;
   }
 
@@ -205,29 +504,40 @@ export class SubscriptionService {
    * Obtiene el estado premium del usuario
    */
   async getUserPremiumStatus(telegramId: number): Promise<boolean> {
-    const user = await this.userModel.findOne({ telegramId });
-    return user?.isPremium || false;
+    const user = await this.userModel.findOne({ id: telegramId }).lean() as unknown as User;
+    return user?.is_pro || false;
   }
 
   /**
    * Obtiene todas las suscripciones activas de un usuario
    */
   async getUserActiveSubscriptions(telegramId: number): Promise<Subscription[]> {
-    const user = await this.userModel.findOne({ telegramId }).populate('subscriptions');
-
-    if (!user) return [];
-
-    const subscriptions = user.subscriptions as any[];
-    return subscriptions.filter((sub) => sub.status === 'ACTIVE');
+    return this.subscriptionModel
+      .find({
+        user_id: String(telegramId),
+        status: 'ACTIVE'
+      })
+      .lean() as unknown as Subscription[];
   }
 
-  async attachSubscriptionToUser(paypalSubscriptionId: string, telegramId: number): Promise<any> {
-    console.log(`Attaching subscription ${paypalSubscriptionId} to user ${telegramId}`);
+  /**
+   * Asocia suscripción a usuario en PayPal usando custom_id
+   */
+  async attachSubscriptionToUser(
+    paypalSubscriptionId: string,
+    telegramId: number
+  ): Promise<{ ok: boolean }> {
+    this.logger.info(`Attaching subscription ${paypalSubscriptionId} to user ${telegramId} in PayPal`);
+
     try {
-      const subscription = await this.paypalService.subscriptionsController.getSubscription({ id: paypalSubscriptionId });
+      const subscription = await this.paypalService.subscriptionsController.getSubscription({
+        id: paypalSubscriptionId
+      });
+
       if (!subscription) {
-        throw new Error('Subscription not found');
+        throw new NotFoundException('Subscription not found in PayPal');
       }
+
       await this.paypalService.subscriptionsController.patchSubscription({
         id: paypalSubscriptionId,
         body: [
@@ -237,32 +547,38 @@ export class SubscriptionService {
             value: telegramId.toString(),
           } as any,
         ]
-      })
+      });
 
-      return {
-        ok: true,
-      }
+      this.logger.info(`Subscription ${paypalSubscriptionId} custom_id updated to ${telegramId}`);
+      return { ok: true };
 
     } catch (error: any) {
-      throw error.message;
+      this.logger.error(`Failed to attach subscription to user in PayPal`, error);
+      throw new Error(error?.message || 'Failed to update PayPal subscription');
     }
-
   }
 
-  async updateSubscription(subscriptionId: string, data: any, otherFilters: any = {}): Promise<void> {
-    const subscription = await this.subscriptionModel
-      .findOne({ id: subscriptionId, ...otherFilters })
+  /**
+   * Actualiza una suscripción con filtros opcionales
+   */
+  async updateSubscription(
+    subscriptionId: string,
+    data: any,
+    otherFilters: any = {}
+  ): Promise<void> {
+    const subscription = await this.subscriptionModel.findOne({
+      paypal_subscription_id: subscriptionId,
+      ...otherFilters
+    });
+
     if (!subscription) {
-      console.error(`Subscription not found: ${subscriptionId}`);
+      this.logger.warn(`Subscription not found for update: ${subscriptionId}`);
       return;
     }
 
-    // Actualizar suscripción
     Object.assign(subscription, data);
     await subscription.save();
 
-    // console.log(`🔄 Subscription updated for user ${(subscription.user as any).telegramId}: ${subscriptionId}`);
+    this.logger.info(`Subscription updated: ${subscriptionId}`);
   }
-
-
 }

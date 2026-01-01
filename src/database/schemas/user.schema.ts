@@ -5,32 +5,14 @@ import { Document, Types } from 'mongoose';
 @Schema({ timestamps: true })
 
 export class User extends Document {
-  @Prop({ required: true, unique: true, index: true })
-  telegramId: number;
+    @Prop({ required: true, unique: true, index: true })
+    id: number;
 
-  @Prop({ type: String, sparse: true })
-  telegramUsername?: string;
+    @Prop({ type: Object, default: {} })
+    pro_features:Record<string, any>;
 
-  @Prop({ type: String, sparse: true })
-  firstName?: string;
-
-  @Prop({ type: String, sparse: true })
-  lastName?: string;
-
-  @Prop({ type: String, sparse: true })
-  paypalPayerId?: string;
-
-  @Prop({ type: String, enum: ['free', 'premium', 'pro'], default: 'free' })
-  tier: 'free' | 'premium' | 'pro';
-
-  @Prop({ type: Boolean, default: false })
-  isPremium: boolean;
-
-  @Prop({ type: [Types.ObjectId], ref: 'Subscription', default: [] })
-  subscriptions: Types.ObjectId[];
-
-  createdAt?: Date;
-  updatedAt?: Date;
+    @Prop({ type: Boolean, default: false })
+    is_pro: boolean;
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);

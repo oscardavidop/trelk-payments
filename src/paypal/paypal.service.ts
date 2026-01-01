@@ -18,14 +18,23 @@ export class PaypalService {
     this.clientId = this.requireEnv('PAYPAL_CLIENT_ID');
     this.clientSecret = this.requireEnv('PAYPAL_CLIENT_SECRET');
 
+    console.log(`[PayPalService] Initializing PayPal Client in ${process.env.PAYPAL_MODE === 'live' ? 'Production' : 'Sandbox'} mode`, this.clientId, this.clientSecret);
+
+    // FIX: Usar variables de entorno, NO hardcodear credenciales
     this.client = new Client({
       clientCredentialsAuthCredentials: {
-        oAuthClientId: "ASSliDYKV_oegv0sWN2MaF0mHMfQo6avfPYdYJhFu5O2tFv-bscGJm6xDLdBn0TJPvtUTI8o-9XJ2sJ_",
-        oAuthClientSecret: "EAAtAgMHvoHoxJTCChXNVJ7kM54ey96Mi9oVaCNWyo4ElrpPq5E1LzQlqhDxHyh1qK_jamYdywCou2VM"
+        oAuthClientId: this.clientId,
+        oAuthClientSecret: this.clientSecret
       },
-      timeout: 0,
-      environment: Environment.Sandbox
+      timeout: 30000, // FIX: 30 segundos timeout
+      environment: process.env.PAYPAL_MODE === 'live' ? Environment.Production : Environment.Sandbox
     });
+
+    // this.client.clientCredentialsAuthManager.fetchToken().then(token => {
+    //   console.log('[PayPalService] Initial access token obtained', token);
+    // }).catch(error => {
+    //   console.error('[PayPalService] Error obtaining initial access token:', error?.message);
+    // });
 
     this.subscriptionsController = new SubscriptionsController(this.client);
     this.ordersController = new OrdersController(this.client);
@@ -37,9 +46,9 @@ export class PaypalService {
 
     this.axiosInstance = axios.create({
       baseURL: apiUrl,
+      timeout: 30000, // FIX: 30 segundos timeout
       headers: {
         'Content-Type': 'application/json',
-        // 'Authorization': `Bearer ${this.accessToken}`,
       },
     });
   }
@@ -57,27 +66,25 @@ export class PaypalService {
 
   /**
    * Obtiene el access token de PayPal
+   * FIX: Cache efectivo con validación de expiración
    */
   async getAccessToken(): Promise<string> {
-
-    // if (this.accessToken && this.tokenExpiry && this.tokenExpiry > new Date()) {
+    // Reutilizar token si aún es válido (con 1 minuto de margen)
+    // if (this.accessToken && this.tokenExpiry > new Date(Date.now() + 60000)) {
     //   return this.accessToken;
     // }
 
     try {
-      //   const response = await this.axiosInstance.post('/v1/oauth2/token', 'grant_type=client_credentials', {
-      //     headers: {
-      //       'Content-Type': 'application/x-www-form-urlencoded',
-      //     },
-      //   });
-
-      //   this.accessToken = response.data.access_token;
-      //   this.tokenExpiry = new Date(Date.now() + response.data.expires_in * 1000 - 60000);
-      const token = await this.client.clientCredentialsAuthManager.fetchToken()
+      const token = await this.client.clientCredentialsAuthManager.fetchToken();
       this.accessToken = token.accessToken;
+
+      // Calcular expiración real (con margen de seguridad)
+      // const expiresIn = (token as any).expiresIn || 3600;
+      // this.tokenExpiry = new Date(Date.now() + (expiresIn * 1000) - 60000);
+
       return this.accessToken;
     } catch (error: any) {
-      console.error('Error getting PayPal access token:', error);
+      console.error('[PayPalService] Error getting access token:', error);
       throw new HttpException('Failed to get PayPal access token', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }

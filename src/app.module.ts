@@ -12,7 +12,7 @@ dotenv.config();
   imports: [
     // DB payments: subscriptions, paypal events
     MongooseModule.forRoot(
-      process.env.MONGODB_URI || 'mongodb+srv://botmaria95:odop1712@cluster0.zt2kped.mongodb.net/',
+      process.env.MONGODB_URI_PAYMENTS!,
       {
         dbName: 'payments',
         connectionName: 'payments',
@@ -20,7 +20,7 @@ dotenv.config();
     ),
     // DB mbot: users
     MongooseModule.forRoot(
-      process.env.MONGODB_URI || 'mongodb+srv://botmaria95:odop1712@cluster0.zt2kped.mongodb.net/',
+      process.env.MONGODB_URI_MBOTS!,
       {
         dbName: 'mbot',
         connectionName: 'mbot',

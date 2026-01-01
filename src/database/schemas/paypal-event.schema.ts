@@ -3,23 +3,33 @@ import { Document, Schema as MongooseSchema } from 'mongoose';
 
 @Schema({ collection: 'events', timestamps: true })
 export class PayPalEvent extends Document {
-  @Prop({ required: true, index: true })
-  eventType: string;
+    // FIX: Agregar event_id único para idempotencia de webhooks
+    @Prop({ unique: true, sparse: true, index: true })
+    event_id?: string;
 
-  @Prop({ type: MongooseSchema.Types.Mixed, required: true })
-  eventBody: Record<string, any>;
+    @Prop({ required: true, index: true })
+    eventType: string;
 
-  @Prop({ type: String, sparse: true })
-  subscriptionId?: string;
+    @Prop({ type: MongooseSchema.Types.Mixed, required: true })
+    eventBody: Record<string, any>;
 
-  @Prop({ type: String, sparse: true })
-  payerId?: string;
+    @Prop({ type: String, sparse: true, index: true })
+    subscriptionId?: string;
 
-  @Prop({ type: Boolean, default: false })
-  processed: boolean;
+    @Prop({ type: String, sparse: true })
+    payerId?: string;
 
-  createdAt?: Date;
-  updatedAt?: Date;
+    @Prop({ type: Boolean, default: false, index: true })
+    processed: boolean;
+
+    @Prop({ type: Boolean, default: false })
+    invalid_signature: boolean;
+
+    createdAt?: Date;
+    updatedAt?: Date;
 }
 
 export const PayPalEventSchema = SchemaFactory.createForClass(PayPalEvent);
+
+// FIX: Índice para detectar eventos duplicados
+PayPalEventSchema.index({ event_id: 1, eventType: 1 });

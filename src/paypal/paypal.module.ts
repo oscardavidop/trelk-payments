@@ -6,6 +6,7 @@ import { SubscriptionModule } from '../subscription/subscription.module';
 import { MongooseModule } from '@nestjs/mongoose';
 import { Subscription, SubscriptionSchema, User, UserSchema } from '../database/schemas';
 import { PayPalEvent, PayPalEventSchema } from '../database/schemas/paypal-event.schema';
+import { LoggerService } from '../common/logger.service';
 
 @Module({
   imports: [
@@ -22,7 +23,7 @@ import { PayPalEvent, PayPalEventSchema } from '../database/schemas/paypal-event
     ),
   ],
   controllers: [PaypalController],
-  providers: [PaypalService],
+  providers: [PaypalService, LoggerService],
   exports: [PaypalService],
 })
 export class PaypalModule { }

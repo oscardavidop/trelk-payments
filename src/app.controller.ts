@@ -22,13 +22,13 @@ export class AppController {
     private subscriptionService: SubscriptionService,
     private paypalService: PaypalService,
     // private telegramService: TelegramService,
-  ) {}
+  ) { }
 
   /**
    * Página para iniciar suscripción (GET /paypal/subscribe?tg_id=123)
    */
   @Get('')
-  async subscribe( @Res() res: Response) {
+  async subscribe(@Res() res: Response) {
 
     try {
       const paypalClientId = this.requireEnv('PAYPAL_CLIENT_ID');
@@ -51,171 +51,171 @@ export class AppController {
   /**
    * Confirma la suscripción (GET /paypal/success?subscription_id=I-XXX&tg_id=123)
    */
-//   @Get('success')
-//   async success(
-//     @Query('subscription_id') subscriptionId: string,
-//     @Query('tg_id') telegramId: string,
-//     @Res() res: Response,
-//   ) {
-//     if (!subscriptionId || !telegramId) {
-//       throw new BadRequestException('subscription_id and tg_id are required');
-//     }
+  //   @Get('success')
+  //   async success(
+  //     @Query('subscription_id') subscriptionId: string,
+  //     @Query('tg_id') telegramId: string,
+  //     @Res() res: Response,
+  //   ) {
+  //     if (!subscriptionId || !telegramId) {
+  //       throw new BadRequestException('subscription_id and tg_id are required');
+  //     }
 
-//     try {
-//       const parsedTgId = parseInt(telegramId, 10);
-//       const planId = this.requireEnv('PAYPAL_PLAN_ID');
+  //     try {
+  //       const parsedTgId = parseInt(telegramId, 10);
+  //       const planId = this.requireEnv('PAYPAL_PLAN_ID');
 
-//       // Guardar suscripción en la base de datos (pendiente de activación por webhook)
-//       await this.subscriptionService.createSubscription(
-//         parsedTgId,
-//         subscriptionId,
-//         planId,
-//         10.0,
-//         'USD',
-//       );
+  //       // Guardar suscripción en la base de datos (pendiente de activación por webhook)
+  //       await this.subscriptionService.createSubscription(
+  //         parsedTgId,
+  //         subscriptionId,
+  //         planId,
+  //         10.0,
+  //         'USD',
+  //       );
 
-//       // Renderizar página de éxito
-//       const html = `
-// <!DOCTYPE html>
-// <html lang="es">
-// <head>
-//   <meta charset="UTF-8">
-//   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-//   <title>¡Suscripción Confirmada!</title>
-//   <style>
-//     * { margin: 0; padding: 0; box-sizing: border-box; }
-//     body {
-//       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-//       background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-//       min-height: 100vh;
-//       display: flex;
-//       align-items: center;
-//       justify-content: center;
-//       padding: 20px;
-//     }
-//     .container {
-//       background: white;
-//       border-radius: 12px;
-//       box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-//       padding: 40px;
-//       max-width: 500px;
-//       width: 100%;
-//       text-align: center;
-//     }
-//     .icon {
-//       font-size: 60px;
-//       margin-bottom: 20px;
-//     }
-//     h1 {
-//       color: #333;
-//       margin-bottom: 10px;
-//       font-size: 28px;
-//     }
-//     .message {
-//       color: #666;
-//       font-size: 16px;
-//       line-height: 1.6;
-//       margin-bottom: 30px;
-//     }
-//     .steps {
-//       text-align: left;
-//       background: #f8f9fa;
-//       border-radius: 8px;
-//       padding: 20px;
-//       margin-bottom: 30px;
-//     }
-//     .steps h3 {
-//       color: #333;
-//       margin-bottom: 15px;
-//     }
-//     .step {
-//       display: flex;
-//       align-items: flex-start;
-//       margin-bottom: 12px;
-//       color: #555;
-//     }
-//     .step-number {
-//       display: inline-block;
-//       width: 24px;
-//       height: 24px;
-//       background: #667eea;
-//       color: white;
-//       border-radius: 50%;
-//       text-align: center;
-//       line-height: 24px;
-//       font-weight: bold;
-//       margin-right: 12px;
-//       flex-shrink: 0;
-//       font-size: 14px;
-//     }
-//     .btn {
-//       display: inline-block;
-//       background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-//       color: white;
-//       padding: 12px 30px;
-//       border-radius: 6px;
-//       text-decoration: none;
-//       font-weight: bold;
-//       border: none;
-//       cursor: pointer;
-//       font-size: 16px;
-//     }
-//     .btn:hover {
-//       transform: translateY(-2px);
-//       box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
-//     }
-//     .info {
-//       text-align: center;
-//       color: #999;
-//       font-size: 12px;
-//       padding-top: 20px;
-//       border-top: 1px solid #eee;
-//     }
-//   </style>
-// </head>
-// <body>
-//   <div class="container">
-//     <div class="icon">✅</div>
-//     <h1>¡Suscripción Confirmada!</h1>
-//     <p class="message">
-//       Tu pago ha sido procesado. En pocos momentos recibirás una confirmación en Telegram.
-//     </p>
+  //       // Renderizar página de éxito
+  //       const html = `
+  // <!DOCTYPE html>
+  // <html lang="es">
+  // <head>
+  //   <meta charset="UTF-8">
+  //   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  //   <title>¡Suscripción Confirmada!</title>
+  //   <style>
+  //     * { margin: 0; padding: 0; box-sizing: border-box; }
+  //     body {
+  //       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  //       background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  //       min-height: 100vh;
+  //       display: flex;
+  //       align-items: center;
+  //       justify-content: center;
+  //       padding: 20px;
+  //     }
+  //     .container {
+  //       background: white;
+  //       border-radius: 12px;
+  //       box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+  //       padding: 40px;
+  //       max-width: 500px;
+  //       width: 100%;
+  //       text-align: center;
+  //     }
+  //     .icon {
+  //       font-size: 60px;
+  //       margin-bottom: 20px;
+  //     }
+  //     h1 {
+  //       color: #333;
+  //       margin-bottom: 10px;
+  //       font-size: 28px;
+  //     }
+  //     .message {
+  //       color: #666;
+  //       font-size: 16px;
+  //       line-height: 1.6;
+  //       margin-bottom: 30px;
+  //     }
+  //     .steps {
+  //       text-align: left;
+  //       background: #f8f9fa;
+  //       border-radius: 8px;
+  //       padding: 20px;
+  //       margin-bottom: 30px;
+  //     }
+  //     .steps h3 {
+  //       color: #333;
+  //       margin-bottom: 15px;
+  //     }
+  //     .step {
+  //       display: flex;
+  //       align-items: flex-start;
+  //       margin-bottom: 12px;
+  //       color: #555;
+  //     }
+  //     .step-number {
+  //       display: inline-block;
+  //       width: 24px;
+  //       height: 24px;
+  //       background: #667eea;
+  //       color: white;
+  //       border-radius: 50%;
+  //       text-align: center;
+  //       line-height: 24px;
+  //       font-weight: bold;
+  //       margin-right: 12px;
+  //       flex-shrink: 0;
+  //       font-size: 14px;
+  //     }
+  //     .btn {
+  //       display: inline-block;
+  //       background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  //       color: white;
+  //       padding: 12px 30px;
+  //       border-radius: 6px;
+  //       text-decoration: none;
+  //       font-weight: bold;
+  //       border: none;
+  //       cursor: pointer;
+  //       font-size: 16px;
+  //     }
+  //     .btn:hover {
+  //       transform: translateY(-2px);
+  //       box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+  //     }
+  //     .info {
+  //       text-align: center;
+  //       color: #999;
+  //       font-size: 12px;
+  //       padding-top: 20px;
+  //       border-top: 1px solid #eee;
+  //     }
+  //   </style>
+  // </head>
+  // <body>
+  //   <div class="container">
+  //     <div class="icon">✅</div>
+  //     <h1>¡Suscripción Confirmada!</h1>
+  //     <p class="message">
+  //       Tu pago ha sido procesado. En pocos momentos recibirás una confirmación en Telegram.
+  //     </p>
 
-//     <div class="steps">
-//       <h3>Próximos pasos:</h3>
-//       <div class="step">
-//         <span class="step-number">1</span>
-//         <span>Vuelve a Telegram</span>
-//       </div>
-//       <div class="step">
-//         <span class="step-number">2</span>
-//         <span>Presiona el botón /premium para confirmar tu acceso</span>
-//       </div>
-//       <div class="step">
-//         <span class="step-number">3</span>
-//         <span>¡Disfruta de tu plan premium!</span>
-//       </div>
-//     </div>
+  //     <div class="steps">
+  //       <h3>Próximos pasos:</h3>
+  //       <div class="step">
+  //         <span class="step-number">1</span>
+  //         <span>Vuelve a Telegram</span>
+  //       </div>
+  //       <div class="step">
+  //         <span class="step-number">2</span>
+  //         <span>Presiona el botón /premium para confirmar tu acceso</span>
+  //       </div>
+  //       <div class="step">
+  //         <span class="step-number">3</span>
+  //         <span>¡Disfruta de tu plan premium!</span>
+  //       </div>
+  //     </div>
 
-//     <button class="btn" onclick="window.location.href='tg://user?id=${parsedTgId}'">
-//       Volver a Telegram
-//     </button>
+  //     <button class="btn" onclick="window.location.href='tg://user?id=${parsedTgId}'">
+  //       Volver a Telegram
+  //     </button>
 
-//     <div class="info">
-//       <p>Se te envió un mensaje por Telegram cuando tu suscripción sea activada.</p>
-//     </div>
-//   </div>
-// </body>
-// </html>
-//       `;
+  //     <div class="info">
+  //       <p>Se te envió un mensaje por Telegram cuando tu suscripción sea activada.</p>
+  //     </div>
+  //   </div>
+  // </body>
+  // </html>
+  //       `;
 
-//       res.setHeader('Content-Type', 'text/html; charset=utf-8');
-//       res.send(html);
-//     } catch (error: any) {
-//       console.error('Error processing subscription:', error?.message || error);
-//       throw new HttpException('Failed to process subscription', HttpStatus.INTERNAL_SERVER_ERROR);
-//     }
-//   }
+  //       res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  //       res.send(html);
+  //     } catch (error: any) {
+  //       console.error('Error processing subscription:', error?.message || error);
+  //       throw new HttpException('Failed to process subscription', HttpStatus.INTERNAL_SERVER_ERROR);
+  //     }
+  //   }
 
   /**
    * Webhook de PayPal para eventos de suscripción
@@ -351,9 +351,9 @@ export class AppController {
       }
 
       const user = await this.subscriptionService['userModel'].findById(subscription.user);
-      if (!user || user.telegramId !== body.tg_id) {
-        throw new UnauthorizedException('You do not own this subscription');
-      }
+      // if (!user || user.telegramId !== body.tg_id) {
+      //   throw new UnauthorizedException('You do not own this subscription');
+      // }
 
       // Cancelar en PayPal
       await this.paypalService.cancelSubscription(body.subscription_id);
