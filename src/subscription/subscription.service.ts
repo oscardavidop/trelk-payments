@@ -254,10 +254,11 @@ export class SubscriptionService {
    * Flujo:
    * 1. Valida que el usuario exista
    * 2. Intenta asociar SOLO si no tiene user_id (previene doble attach)
-   * 3. Si ya está activa, intenta activar features automáticamente
-   * 
+   * 3. Si no existe en DB → la busca en PayPal, la registra y attach en la misma op
+   * 4. Si ya está activa, intenta activar features automáticamente
+   *
    * @throws ConflictException si ya está asociada a un usuario
-   * @throws NotFoundException si el usuario no existe
+   * @throws NotFoundException si el usuario no existe o PayPal no conoce el ID
    */
   async attachUser(
     paypalSubscriptionId: string,
@@ -270,22 +271,17 @@ export class SubscriptionService {
     }
 
     // Operación ATÓMICA: solo actualiza si NO tiene user_id
-    const subscription = await this.subscriptionModel.findOneAndUpdate(
+    let subscription = await this.subscriptionModel.findOneAndUpdate(
       {
         paypal_subscription_id: paypalSubscriptionId,
-        user_id: { $exists: false } // CRÍTICO: previene doble attach
+        user_id: { $exists: false }, // CRÍTICO: previene doble attach
       },
       {
         $set: { user_id: userId },
-        $setOnInsert: {
-          paypal_subscription_id: paypalSubscriptionId,
-          status: 'PENDING_ASSOCIATION',
-          createdAt: new Date(),
-        }
       },
       {
         new: true,
-        upsert: false // NO crear si no existe
+        upsert: false,
       }
     );
 
@@ -297,19 +293,69 @@ export class SubscriptionService {
 
       if (existing?.user_id) {
         throw new ConflictException(
-          `Subscription ${paypalSubscriptionId} is already attached`
+          `Subscription ${paypalSubscriptionId} is already attached`,
         );
       }
 
-      throw new NotFoundException(`Subscription not found: ${paypalSubscriptionId}`);
+      // No existe en DB → buscar en PayPal y registrarla con el attach incluido
+      this.logger.warn(
+        `Subscription ${paypalSubscriptionId} not in DB, fetching from PayPal…`,
+      );
+
+      let paypalData: any;
+      try {
+        paypalData = await this.paypalService.getSubscription(paypalSubscriptionId);
+      } catch (err) {
+        this.logger.error(
+          `PayPal lookup failed for ${paypalSubscriptionId}`,
+          err,
+        );
+        throw new NotFoundException(
+          `Subscription ${paypalSubscriptionId} not found in DB or PayPal`,
+        );
+      }
+
+      // Mapear estado PayPal → estado interno
+      const VALID_STATUSES = [
+        'APPROVAL_PENDING',
+        'PENDING_ASSOCIATION',
+        'ACTIVE',
+        'SUSPENDED',
+        'CANCELLED',
+        'EXPIRED',
+      ];
+      const rawStatus: string = (paypalData.status ?? 'APPROVAL_PENDING').toUpperCase();
+      const mappedStatus = VALID_STATUSES.includes(rawStatus)
+        ? rawStatus
+        : 'APPROVAL_PENDING';
+
+      // Upsert: crea la suscripción con user_id ya adjunto (atómico)
+      subscription = await this.subscriptionModel.findOneAndUpdate(
+        { paypal_subscription_id: paypalSubscriptionId },
+        {
+          $setOnInsert: {
+            paypal_subscription_id: paypalSubscriptionId,
+            plan_id: paypalData.plan_id ?? '',
+            start_time: paypalData.start_time,
+            quantity: paypalData.quantity,
+            status: mappedStatus,
+            createdAt: new Date(),
+          },
+          $set: { user_id: userId },
+        },
+        { new: true, upsert: true },
+      );
+
+      this.logger.info(
+        `Subscription ${paypalSubscriptionId} registered from PayPal (status: ${mappedStatus}) and attached to user ${userId}`,
+      );
     }
 
     this.logger.info(`Subscription ${paypalSubscriptionId} attached to user ${userId}`);
 
     // Si ya está ACTIVE, intentar activar features automáticamente
-    if (subscription.status === 'ACTIVE' && !subscription.features_applied) {
+    if (subscription!.status === 'ACTIVE' && !(subscription as any).features_applied) {
       this.logger.info(`Subscription already ACTIVE, triggering feature activation`);
-      // Ejecutar en background para no bloquear la respuesta
       setImmediate(() => {
         this.tryActivateFeatures(paypalSubscriptionId).catch(err =>
           this.logger.error(`Failed to auto-activate features for ${paypalSubscriptionId}`, err)
@@ -317,7 +363,7 @@ export class SubscriptionService {
       });
     }
 
-    return subscription;
+    return subscription as Subscription;
   }
 
   /**
@@ -488,6 +534,10 @@ export class SubscriptionService {
           currency: update.currency,
           plan_id: resource?.plan_id || 'unknown',
           paypal_payerId: update.paypal_payerId,
+          // B-5 FIX: garantizar que la query atómica de tryActivateFeatures
+          // pueda encontrarlo cuando featues_applied no exista en el documento
+          features_applied: false,
+          activation_notified: false,
           createdAt: new Date(),
         });
       } catch (error) {
@@ -559,25 +609,25 @@ export class SubscriptionService {
   }
 
   /**
-   * Actualiza una suscripción con filtros opcionales
+   * Actualiza una suscripción con filtros opcionales.
+   * FIX A-9: Usa findOneAndUpdate atómico en lugar de findOne + Object.assign + save
+   * que tenía una race condition clásica read-modify-write.
    */
   async updateSubscription(
     subscriptionId: string,
-    data: any,
-    otherFilters: any = {}
+    data: Record<string, any>,
+    otherFilters: Record<string, any> = {},
   ): Promise<void> {
-    const subscription = await this.subscriptionModel.findOne({
-      paypal_subscription_id: subscriptionId,
-      ...otherFilters
-    });
+    const result = await this.subscriptionModel.findOneAndUpdate(
+      { paypal_subscription_id: subscriptionId, ...otherFilters },
+      { $set: data },
+      { new: true },
+    );
 
-    if (!subscription) {
+    if (!result) {
       this.logger.warn(`Subscription not found for update: ${subscriptionId}`);
       return;
     }
-
-    Object.assign(subscription, data);
-    await subscription.save();
 
     this.logger.info(`Subscription updated: ${subscriptionId}`);
   }

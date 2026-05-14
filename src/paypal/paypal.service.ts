@@ -1,24 +1,32 @@
 import { Injectable, HttpException, HttpStatus } from '@nestjs/common';
 import axios, { AxiosInstance } from 'axios';
 import { createHmac } from 'crypto';
-import { Client, Environment, LogLevel, OrdersController, SubscriptionsController } from '@paypal/paypal-server-sdk';
+import { Client, Environment, OrdersController, SubscriptionsController } from '@paypal/paypal-server-sdk';
+import { RedisService } from '../redis/redis.service';
+
+/** Clave Redis para el access token de PayPal (compartido entre todos los pods) */
+const PAYPAL_TOKEN_REDIS_KEY = 'paypal:access_token';
+
+/** Clave Redis del lock de refresco (previene stampede multi-instancia) */
+const PAYPAL_TOKEN_LOCK_KEY = 'paypal:token:lock';
 
 @Injectable()
 export class PaypalService {
   private axiosInstance: AxiosInstance;
-  private accessToken = '';
-  private tokenExpiry = new Date(0);
+  /** Fallback in-memory: usado si Redis no está disponible */
+  private fallbackToken = '';
   private readonly clientId: string;
   private readonly clientSecret: string;
   private readonly client: Client;
   public readonly subscriptionsController: SubscriptionsController;
   public readonly ordersController: OrdersController;
 
-  constructor() {
+  constructor(private readonly redisService: RedisService) {
     this.clientId = this.requireEnv('PAYPAL_CLIENT_ID');
     this.clientSecret = this.requireEnv('PAYPAL_CLIENT_SECRET');
 
-    console.log(`[PayPalService] Initializing PayPal Client in ${process.env.PAYPAL_MODE === 'live' ? 'Production' : 'Sandbox'} mode`, this.clientId, this.clientSecret);
+    // SEGURIDAD: NUNCA loguear clientId ni clientSecret
+    console.log(`[PayPalService] Initializing in ${process.env.PAYPAL_MODE === 'live' ? 'Production' : 'Sandbox'} mode`);
 
     // FIX: Usar variables de entorno, NO hardcodear credenciales
     this.client = new Client({
@@ -65,27 +73,59 @@ export class PaypalService {
   }
 
   /**
-   * Obtiene el access token de PayPal
-   * FIX: Cache efectivo con validación de expiración
+   * Obtiene el access token de PayPal.
+   *
+   * Estrategia multi-capa (resiliente en todos los escenarios):
+   * 1. Cache Redis: consulta rápida, compartida entre todos los pods/instancias.
+   * 2. Distributed lock: exactamente UN pod refresca el token cuando expira.
+   *    (Previene el «thundering herd» problem con N pods arrancando a la vez)
+   * 3. Double-check tras lock: si otro pod ya refrescó mientras esperábamos.
+   * 4. Fallback in-memory: si Redis no está disponible, degrada graciosamente.
    */
   async getAccessToken(): Promise<string> {
-    // Reutilizar token si aún es válido (con 1 minuto de margen)
-    // if (this.accessToken && this.tokenExpiry > new Date(Date.now() + 60000)) {
-    //   return this.accessToken;
-    // }
+    // ── 1. Fast path: token en Redis ─────────────────────────────────────────
+    const cached = await this.redisService.get(PAYPAL_TOKEN_REDIS_KEY);
+    if (cached) return cached;
+
+    // ── 2. Adquirir lock distribuido (15s TTL) ───────────────────────────────
+    // Sólo un pod refresca a la vez; los demás esperan y reusan el resultado.
+    const lockToken = await this.redisService.acquireLock(PAYPAL_TOKEN_LOCK_KEY, 15_000);
+
+    if (!lockToken) {
+      // Otro pod tiene el lock → esperar 300ms y reusar su resultado
+      await new Promise((r) => setTimeout(r, 300));
+      const retryCache = await this.redisService.get(PAYPAL_TOKEN_REDIS_KEY);
+      if (retryCache) return retryCache;
+      // Si aún no hay token (ej: Redis caído), continuar sin lock
+    }
 
     try {
+      // ── 3. Double-check post-lock (otro pod pudo haberlo seteado) ──────────
+      if (lockToken) {
+        const afterLock = await this.redisService.get(PAYPAL_TOKEN_REDIS_KEY);
+        if (afterLock) return afterLock;
+      }
+
+      // ── 4. Obtener nuevo token de PayPal ──────────────────────────────────
       const token = await this.client.clientCredentialsAuthManager.fetchToken();
-      this.accessToken = token.accessToken;
+      const accessToken = token.accessToken;
+      const expiresIn: number = (token as any).expiresIn ?? 3600;
+      const ttlSeconds = Math.max(expiresIn - 60, 30); // margen 60s, mínimo 30s
 
-      // Calcular expiración real (con margen de seguridad)
-      // const expiresIn = (token as any).expiresIn || 3600;
-      // this.tokenExpiry = new Date(Date.now() + (expiresIn * 1000) - 60000);
+      // Guardar en Redis (compartido) y en memoria (fallback local)
+      await this.redisService.set(PAYPAL_TOKEN_REDIS_KEY, accessToken, ttlSeconds);
+      this.fallbackToken = accessToken;
 
-      return this.accessToken;
+      return accessToken;
     } catch (error: any) {
-      console.error('[PayPalService] Error getting access token:', error);
+      console.error('[PayPalService] Error getting access token:', error?.message);
+      // Fallback in-memory si Redis/PayPal fallan
+      if (this.fallbackToken) return this.fallbackToken;
       throw new HttpException('Failed to get PayPal access token', HttpStatus.INTERNAL_SERVER_ERROR);
+    } finally {
+      if (lockToken) {
+        await this.redisService.releaseLock(PAYPAL_TOKEN_LOCK_KEY, lockToken);
+      }
     }
   }
 
@@ -347,11 +387,32 @@ export class PaypalService {
 
 
   /**
-   * Obtiene el ID de webhook del cliente (para verificación local)
+   * Obtiene el certificado de PayPal para verificación local de webhooks.
+   * SEGURIDAD: Solo permite URLs que pertenezcan a los dominios oficiales de PayPal
+   * para prevenir SSRF (Server-Side Request Forgery).
    */
-  async getWebhookSignatureKey(transmissionId: string, transmissionTime: string, certUrl: string): Promise<string> {
+  async getWebhookSignatureKey(certUrl: string): Promise<string> {
+    // SSRF guard: solo dominios PayPal aceptados
+    const ALLOWED_CERT_HOSTS = [
+      'api.paypal.com',
+      'api-m.paypal.com',
+      'api.sandbox.paypal.com',
+      'api-m.sandbox.paypal.com',
+    ];
+    let parsedUrl: URL;
     try {
-      const response = await axios.get(certUrl);
+      parsedUrl = new URL(certUrl);
+    } catch {
+      throw new HttpException('Invalid cert URL', HttpStatus.BAD_REQUEST);
+    }
+    if (!ALLOWED_CERT_HOSTS.includes(parsedUrl.hostname)) {
+      throw new HttpException('Untrusted cert URL host', HttpStatus.BAD_REQUEST);
+    }
+    if (parsedUrl.protocol !== 'https:') {
+      throw new HttpException('Cert URL must use HTTPS', HttpStatus.BAD_REQUEST);
+    }
+    try {
+      const response = await axios.get(certUrl, { timeout: 5000 });
       return response.data;
     } catch (error: any) {
       console.error('Error getting webhook certificate:', error?.message);

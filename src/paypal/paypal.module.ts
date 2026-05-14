@@ -1,29 +1,28 @@
 import { Module, forwardRef } from '@nestjs/common';
 import { PaypalService } from './paypal.service';
 import { PaypalController } from './paypal.controller';
-import { TelegramModule } from '../telegram/telegram.module';
 import { SubscriptionModule } from '../subscription/subscription.module';
-import { MongooseModule } from '@nestjs/mongoose';
-import { Subscription, SubscriptionSchema, User, UserSchema } from '../database/schemas';
-import { PayPalEvent, PayPalEventSchema } from '../database/schemas/paypal-event.schema';
 import { LoggerService } from '../common/logger.service';
+import { QueuesModule } from '../queues/queues.module';
 
+/**
+ * PaypalModule — proceso API solamente.
+ *
+ * El controller ahora es delgado: verifica firma y encola en BullMQ.
+ * Todo el procesamiento de eventos ocurre en el Worker (WebhookProcessorModule).
+ *
+ * Dependencias eliminadas vs versión anterior:
+ * - MongooseModule (controller ya no hace operaciones DB directas)
+ * - TelegramModule (solo necesario en el processor del Worker)
+ * - Schemas de User y PayPalEvent (idem)
+ */
 @Module({
   imports: [
     forwardRef(() => SubscriptionModule),
-    TelegramModule,
-    MongooseModule.forFeature(
-      [{ name: Subscription.name, schema: SubscriptionSchema },
-      { name: PayPalEvent.name, schema: PayPalEventSchema }],
-      'payments',
-    ),
-    MongooseModule.forFeature(
-      [{ name: User.name, schema: UserSchema }],
-      'mbot',
-    ),
+    QueuesModule,
   ],
   controllers: [PaypalController],
   providers: [PaypalService, LoggerService],
   exports: [PaypalService],
 })
-export class PaypalModule { }
+export class PaypalModule {}

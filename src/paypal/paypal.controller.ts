@@ -4,185 +4,145 @@ import {
   Post,
   Body,
   Query,
-  Res,
   BadRequestException,
   HttpException,
   HttpStatus,
   UnauthorizedException,
   Req,
+  Logger,
 } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
-import { Response } from 'express';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { PaypalService } from './paypal.service';
-import { TelegramService } from '../telegram/telegram.service';
-import { PayPalEvent } from '../database/schemas/paypal-event.schema';
-import { User } from '../database/schemas/user.schema';
 import { LoggerService } from '../common/logger.service';
+import { AttachSubscriptionDto } from './dto/attach-subscription.dto';
+import { CancelSubscriptionDto } from './dto/cancel-subscription.dto';
+import { PaypalWebhookProducer } from '../queues/paypal-webhook.producer';
+import { RedisService } from '../redis/redis.service';
+import { WEBHOOK_DONE_PREFIX } from '../queues/paypal-webhook.types';
+
+// ── Ventana de tolerancia para timestamps de PayPal ────────────────────────
+// PayPal puede entregar webhooks con cierto retraso; 5 minutos es razonable.
+// Esto previene replay attacks con webhooks viejos capturados.
+const WEBHOOK_TIMESTAMP_TOLERANCE_MS = 5 * 60 * 1_000;
 
 @Controller('paypal')
 export class PaypalController {
+  private readonly logger = new Logger(PaypalController.name);
+
   constructor(
-    private subscriptionService: SubscriptionService,
-    private paypalService: PaypalService,
-    private telegramService: TelegramService,
-    @InjectModel(PayPalEvent.name, 'payments')
-    private paypalEventModel: Model<PayPalEvent>,
-    @InjectModel(User.name, 'mbot')
-    private userModel: Model<User>,
-    private logger: LoggerService,
-  ) { }
+    private readonly subscriptionService: SubscriptionService,
+    private readonly paypalService: PaypalService,
+    private readonly producer: PaypalWebhookProducer,
+    private readonly redisService: RedisService,
+    private readonly loggerService: LoggerService,
+  ) {}
 
   /**
-   * Webhook de PayPal para eventos de suscripción
-   * FIX: Mejor idempotencia y logs sanitizados
+   * Webhook de PayPal — endpoint HTTP delgado.
+   *
+   * Responsabilidades del API (síncrono, <50ms):
+   * 1. Validar timestamp → previene replay attacks
+   * 2. Verificar firma criptográfica → previene spoofing
+   * 3. Verificar idempotencia Redis → evita re-encolar eventos ya procesados
+   * 4. Encolar job en BullMQ → responder 200 inmediatamente
+   *
+   * El procesamiento real (activar suscripciones, notificar Telegram, etc.)
+   * ocurre de forma asíncrona en el proceso Worker separado.
+   * Esto garantiza que PayPal recibe ACK en <5s incluso si hay lentitud en DB.
    */
   @Post('events')
   async webhook(@Body() body: any, @Req() req: any) {
-    const eventId = body.id;
-    const eventType = body.event_type;
+    const eventId: string = body?.id;
+    const eventType: string = body?.event_type;
+    const correlationId = req.headers['paypal-transmission-id'] ?? eventId ?? 'unknown';
 
-    console.log(`[PayPal Webhook] Received: ${eventType} (${eventId})`);
-
-    // FIX: Verificar si ya fue procesado (idempotencia)
-    const existing = await this.paypalEventModel.findOne({ event_id: eventId }).lean();
-    if (existing?.processed) {
-      // console.log(`[PayPal Webhook] Already processed: ${eventId}`);
-      // return { status: 'already_processed', event_id: eventId };
+    // ── 0. Validación básica del payload ─────────────────────────────────────
+    if (!eventId || !eventType || !body.resource) {
+      this.logger.warn(`[${correlationId}] Malformed webhook payload rejected`);
+      return { status: 'rejected', reason: 'malformed_payload' };
     }
 
+    // ── 1. Validación de timestamp (anti-replay) ──────────────────────────────
+    const transmissionTime = req.headers['paypal-transmission-time'] as string;
+    if (transmissionTime) {
+      const eventTs = new Date(transmissionTime).getTime();
+      const now = Date.now();
+      if (isNaN(eventTs) || Math.abs(now - eventTs) > WEBHOOK_TIMESTAMP_TOLERANCE_MS) {
+        this.logger.warn(`[${correlationId}] Webhook timestamp out of window: ${transmissionTime}`);
+        return { status: 'rejected', reason: 'timestamp_out_of_window' };
+      }
+    }
+
+    // ── 2. Verificación criptográfica de firma ────────────────────────────────
+    const webhookId = this.requireEnv('PAYPAL_WEBHOOK_ID');
+    let isValid: boolean;
     try {
-      // Guardar evento con upsert para idempotencia
-      const event = await this.paypalEventModel.findOneAndUpdate(
-        { event_id: eventId },
-        {
-          $setOnInsert: {
-            event_id: eventId,
-            eventType,
-            eventBody: body,
-            subscriptionId: body.resource?.id,
-            payerId: body.resource?.payer?.email_address,
-            processed: false,
-          }
-        },
-        { upsert: true, new: true }
+      isValid = await this.paypalService.verifyWebhookSignature(webhookId, req);
+    } catch (err: any) {
+      this.logger.error(`[${correlationId}] Signature verification error: ${err?.message}`);
+      return { status: 'error', reason: 'signature_verification_failed' };
+    }
+
+    if (!isValid) {
+      // Log de seguridad: firma inválida — posible intento de spoofing
+      this.logger.warn(
+        `[${correlationId}] Invalid PayPal webhook signature — rejected ` +
+          `[eventType=${eventType}, eventId=${eventId}]`,
       );
+      return { status: 'rejected', reason: 'invalid_signature' };
+    }
 
-      console.log(`[PayPal Webhook] Event saved: ${event._id}`);
+    // ── 3. Idempotencia Redis (fast path) ─────────────────────────────────────
+    // Evita re-encolar eventos que el Worker ya procesó exitosamente.
+    // El Worker setea esta clave (TTL 24h) cuando completa el job.
+    const doneKey = `${WEBHOOK_DONE_PREFIX}${eventId}`;
+    const alreadyDone = await this.redisService.get(doneKey);
+    if (alreadyDone) {
+      this.logger.log(`[${correlationId}] Webhook already processed (Redis) — skipping`);
+      return { status: 'already_processed', event_id: eventId };
+    }
 
-      const webhookId = this.requireEnv('PAYPAL_WEBHOOK_ID');
-      const isValid = await this.paypalService.verifyWebhookSignature(webhookId, req);
+    // ── 4. Encolar en BullMQ y responder 200 inmediatamente ───────────────────
+    // BullMQ usa jobId=eventId para deduplicación: si el job ya está en cola
+    // (being processed), rechaza silenciosamente el duplicado.
+    try {
+      const jobId = await this.producer.enqueueWebhook({
+        eventId,
+        eventType,
+        resource: body.resource,
+        correlationId,
+        receivedAt: new Date().toISOString(),
+      });
 
-      if (!isValid) {
-        await this.paypalEventModel.updateOne(
-          { _id: event._id },
-          { $set: { invalid_signature: true, processed: false } }
-        );
-        console.warn(`[PayPal Webhook] Invalid signature: ${eventId}`);
-        return { status: 'invalid_signature', event_id: eventId };
-      }
-
-      const resource = body.resource;
-
-      if (!resource) {
-        throw new BadRequestException('Invalid webhook payload');
-      }
-
-      switch (eventType) {
-        case 'BILLING.SUBSCRIPTION.ACTIVATED': {
-          console.log(`[PayPal Webhook] Activating subscription: ${resource.id}`);
-
-          await this.subscriptionService.updateStatus(resource.id, 'ACTIVE', resource);
-          await this.subscriptionService.tryActivateFeatures(resource.id);
-          break;
-        }
-
-        case 'BILLING.SUBSCRIPTION.UPDATED': {
-          console.log(`[PayPal Webhook] Subscription updated: ${resource.id}`);
-
-          const subscription = await this.subscriptionService.getSubscriptionByPaypalId(resource.id);
-          if (!subscription) {
-            console.error(`[PayPal Webhook] Subscription not found: ${resource.id}`);
-            break;
-          }
-
-          const customId = resource.custom_id;
-
-          // Si tiene custom_id y la suscripción está pendiente de asociación
-          if (customId && subscription.status === 'PENDING_ASSOCIATION' && !subscription.user_id) {
-            await this.subscriptionService.updateSubscription(
-              resource.id,
-              { user_id: customId },
-              { user_id: { $exists: false } }
-            );
-            console.log(`[PayPal Webhook] User attached: ${customId} -> ${resource.id}`);
-          }
-          break;
-        }
-
-        case 'BILLING.SUBSCRIPTION.CANCELLED': {
-          console.log(`[PayPal Webhook] Subscription cancelled: ${resource.id}`);
-          await this.subscriptionService.cancelSubscription(resource.id);
-          break;
-        }
-
-        case 'BILLING.SUBSCRIPTION.SUSPENDED': {
-          console.log(`[PayPal Webhook] Subscription suspended: ${resource.id}`);
-          await this.subscriptionService.suspendSubscription(resource.id);
-          break;
-        }
-
-        case 'BILLING.SUBSCRIPTION.RE_ACTIVATED': {
-          console.log(`[PayPal Webhook] Subscription reactivated: ${resource.id}`);
-          await this.subscriptionService.resumeSubscription(resource.id);
-          break;
-        }
-
-        case 'PAYMENT.BILLING.SUBSCRIPTION.PAYMENT.FAILED': {
-          console.log(`[PayPal Webhook] Payment failed: ${resource.id}`);
-          const subscription = await this.subscriptionService.getSubscriptionByPaypalId(resource.id);
-          if (subscription?.user_id) {
-            await this.telegramService.notifyPaymentFailed(Number(subscription.user_id));
-          }
-          break;
-        }
-
-        case 'BILLING.SUBSCRIPTION.CREATED': {
-          console.log(`[PayPal Webhook] Subscription created: ${resource.id}`);
-          await this.subscriptionService.updateFromWebhook(resource);
-          break;
-        }
-
-        default:
-          console.log(`[PayPal Webhook] Event not handled: ${eventType}`);
-      }
-
-      // Marcar evento como procesado
-      await this.paypalEventModel.updateOne(
-        { _id: event._id },
-        { $set: { processed: true } }
+      this.logger.log(
+        `[${correlationId}] Webhook enqueued [jobId=${jobId}, eventType=${eventType}]`,
       );
-
-      return { status: 'success', event_id: eventId };
-    } catch (error: any) {
-      console.error(`[PayPal Webhook] Error processing ${eventId}:`, error?.message);
-      return { status: 'error', event_id: eventId, error: error?.message };
+      return { status: 'queued', event_id: eventId, job_id: jobId };
+    } catch (err: any) {
+      this.logger.error(`[${correlationId}] Failed to enqueue webhook: ${err?.message}`);
+      // Devolver 500: PayPal reintentará con backoff exponencial
+      throw new HttpException('Failed to queue webhook for processing', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
+  /**
+   * Asocia una suscripción a un usuario de Telegram.
+   * Requiere API key interna. Solo para uso server-to-server.
+   *
+   * FIX A-3/A-4: Ahora usa DTO tipado con class-validator.
+   */
   @Post('subscription/attach')
   async attachSubscription(
-    @Body() body: { tg_id: number; subscription_id: string },
+    @Body() body: AttachSubscriptionDto,
     @Req() req: any,
   ) {
-    const authorization = req.headers['authorization'];
-    if (authorization !== `Bearer ${this.requireEnv('EXTERNAL_API_KEY')}`) {
+    // Autenticación por API key interna (timing-safe comparison)
+    const authorization = req.headers['authorization'] as string | undefined;
+    const expectedKey = `Bearer ${this.requireEnv('EXTERNAL_API_KEY')}`;
+    if (!this.timingSafeEqual(authorization ?? '', expectedKey)) {
       throw new UnauthorizedException('Invalid API key');
     }
-    if (!body.tg_id || !body.subscription_id) {
-      throw new BadRequestException('tg_id and subscription_id are required');
-    }
+
     return this.subscriptionService.attachUser(
       body.subscription_id,
       String(body.tg_id),
@@ -190,16 +150,22 @@ export class PaypalController {
   }
 
   /**
-   * Endpoint para verificar estado de suscripción (GET /paypal/status?tg_id=123)
+   * Verifica el estado premium de un usuario.
+   * GET /paypal/status?tg_id=123
+   *
+   * NOTA: Endpoint público. No exponer datos sensibles.
    */
   @Get('status')
   async status(@Query('tg_id') telegramId: string) {
     if (!telegramId) {
       throw new BadRequestException('tg_id is required');
     }
+    const parsedTgId = parseInt(telegramId, 10);
+    if (isNaN(parsedTgId) || parsedTgId <= 0) {
+      throw new BadRequestException('tg_id must be a positive integer');
+    }
 
     try {
-      const parsedTgId = parseInt(telegramId, 10);
       const isPremium = await this.subscriptionService.getUserPremiumStatus(parsedTgId);
       const subscriptions = await this.subscriptionService.getUserActiveSubscriptions(parsedTgId);
 
@@ -210,55 +176,88 @@ export class PaypalController {
         subscriptions: subscriptions.map((sub) => ({
           id: sub.id,
           status: sub.status,
-          amount: sub.amount,
-          currency: sub.currency,
+          // No exponer amount/currency si no es necesario para el consumidor
           createdAt: sub.createdAt,
         })),
       };
-    } catch (error: any) {
-      throw new HttpException('Failed to get subscription status', HttpStatus.INTERNAL_SERVER_ERROR);
+    } catch {
+      throw new HttpException(
+        'Failed to get subscription status',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
     }
   }
 
   /**
-   * Endpoint para cancelar suscripción (POST /paypal/cancel)
+   * Cancela una suscripción.
+   * POST /paypal/cancel
+   *
+   * FIX C-3: Restaurado el ownership check que estaba comentado.
+   * FIX C-8: Este endpoint NO debería ser público. Requiere API key interna.
+   * En producción real, debería requerir JWT del usuario.
+   *
+   * FIX A-3/A-4: Usa DTO tipado.
    */
   @Post('cancel')
-  async cancel(@Body() body: { tg_id: number; subscription_id: string }) {
-    if (!body.tg_id || !body.subscription_id) {
-      throw new BadRequestException('tg_id and subscription_id are required');
+  async cancel(@Body() body: CancelSubscriptionDto, @Req() req: any) {
+    // Autenticación mínima (reemplazar por JWT en producción)
+    const authorization = req.headers['authorization'] as string | undefined;
+    const expectedKey = `Bearer ${this.requireEnv('EXTERNAL_API_KEY')}`;
+    if (!this.timingSafeEqual(authorization ?? '', expectedKey)) {
+      throw new UnauthorizedException('Unauthorized');
+    }
+
+    const subscription = await this.subscriptionService.getSubscriptionByPaypalId(
+      body.subscription_id,
+    );
+
+    if (!subscription) {
+      throw new BadRequestException('Subscription not found');
+    }
+
+    // FIX C-3: Verificar que el usuario es propietario de la suscripción
+    if (!subscription.user_id || subscription.user_id !== String(body.tg_id)) {
+      this.logger.warn(
+        `Cancel attempt by non-owner: tg_id=${body.tg_id}, subscription owner=${subscription.user_id}`,
+      );
+      throw new UnauthorizedException('You do not own this subscription');
     }
 
     try {
-      // Verificar que el usuario sea propietario de la suscripción
-      const subscription = await this.subscriptionService.getSubscriptionByPaypalId(body.subscription_id);
-
-      if (!subscription) {
-        throw new BadRequestException('Subscription not found');
-      }
-
-      const user = await this.userModel.findById(subscription.user);
-      // if (!user || user.telegramId !== body.tg_id) {
-      //   throw new UnauthorizedException('You do not own this subscription');
-      // }
-
-      // Cancelar en PayPal
       await this.paypalService.cancelSubscription(body.subscription_id);
-
+      await this.subscriptionService.cancelSubscription(body.subscription_id);
       return { status: 'cancelled' };
     } catch (error: any) {
-      if (error instanceof UnauthorizedException || error instanceof BadRequestException) {
+      if (
+        error instanceof UnauthorizedException ||
+        error instanceof BadRequestException
+      ) {
         throw error;
       }
-      throw new HttpException('Failed to cancel subscription', HttpStatus.INTERNAL_SERVER_ERROR);
+      throw new HttpException(
+        'Failed to cancel subscription',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * Comparación en tiempo constante de strings para prevenir timing attacks.
+   * No usar === para comparar secrets/tokens.
+   */
+  private timingSafeEqual(a: string, b: string): boolean {
+    const { timingSafeEqual: cryptoEqual } = require('crypto');
+    if (a.length !== b.length) return false;
+    try {
+      return cryptoEqual(Buffer.from(a), Buffer.from(b));
+    } catch {
+      return false;
     }
   }
 
   private requireEnv(key: string): string {
     const value = process.env[key];
-    if (!value) {
-      throw new Error(`Missing required environment variable ${key}`);
-    }
+    if (!value) throw new Error(`Missing required environment variable ${key}`);
     return value;
   }
 }

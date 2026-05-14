@@ -85,10 +85,6 @@ export class Subscription extends Document {
     @Prop()
     cancelledAt?: Date;
 
-    // 👤 Usuario (deprecated, usar user_id)
-    @Prop({ type: Types.ObjectId, ref: 'User' })
-    user?: Types.ObjectId;
-
     // Telegram / external ID
     @Prop({ sparse: true, index: true })
     user_id?: string;
@@ -109,18 +105,31 @@ export class Subscription extends Document {
 
 export const SubscriptionSchema = SchemaFactory.createForClass(Subscription);
 
-// Índices para atomicidad y performance en operaciones críticas
+// ── Índices para atomicidad y performance en operaciones críticas ──────────
+
+// Clave única: previene duplicados de suscripciones en PayPal
+// (ya está como @Prop unique:true, pero lo declaramos explícitamente)
+SubscriptionSchema.index({ paypal_subscription_id: 1 }, { unique: true });
+
+// Índice compuesto para tryActivateFeatures (query atómica crítica)
 SubscriptionSchema.index({
-    paypal_subscription_id: 1,
-    status: 1,
-    features_applied: 1
+  paypal_subscription_id: 1,
+  status: 1,
+  features_applied: 1,
 });
 
-SubscriptionSchema.index({
-    paypal_subscription_id: 1,
-    user_id: 1
-});
+// Índice para cancelSubscription / updateStatus
+SubscriptionSchema.index({ paypal_subscription_id: 1, user_id: 1 });
 
+// B-1 FIX: Índice compuesto para getUserActiveSubscriptions
+// Query: { user_id: "xxx", status: "ACTIVE" }
 SubscriptionSchema.index({ user_id: 1, status: 1 });
+
+// Índice para búsquedas por plan
 SubscriptionSchema.index({ plan_id: 1 });
+
+// Índice para estado (reconciliación, cron jobs)
 SubscriptionSchema.index({ status: 1 });
+
+// Índice para detectar suscripciones próximas a vencer (cron de reconciliación)
+SubscriptionSchema.index({ next_billing_date: 1, status: 1 });
