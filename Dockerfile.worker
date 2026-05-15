@@ -1,0 +1,45 @@
+# ──────────────────────────────────────────────────────────────
+# Dockerfile.worker — Worker Process (BullMQ consumer + cron)
+# Comparte el mismo build stage que el API.
+# Proceso separado: NO expone puertos HTTP.
+# ──────────────────────────────────────────────────────────────
+
+# ── Stage 1: Build (idéntico al API) ─────────────────────────
+FROM node:20-alpine AS builder
+
+RUN apk add --no-cache python3 make g++
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci --frozen-lockfile
+
+COPY tsconfig.json nest-cli.json ./
+COPY src/ ./src/
+
+RUN npm run build
+
+# ── Stage 2: Production worker ────────────────────────────────
+FROM node:20-alpine AS production
+
+RUN apk add --no-cache dumb-init
+
+WORKDIR /app
+
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package.json ./package.json
+
+RUN chown -R node:node /app
+USER node
+
+# El worker no necesita PORT pero sí las variables de los servicios
+ENV NODE_ENV=production \
+    NODE_OPTIONS="--max-old-space-size=256"
+
+# El worker no expone HTTP — no hay EXPOSE ni HEALTHCHECK HTTP.
+# La salud se monitorea indirectamente: si el proceso muere, Docker restart lo levanta.
+# BullMQ tiene su propio sistema de stalled jobs para detectar workers caídos.
+
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["node", "dist/worker.js"]

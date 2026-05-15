@@ -1,0 +1,97 @@
+# docker-compose.dev.yml — Entorno de DESARROLLO local
+#
+# Inicia: API (watch mode via ts-node), Worker (watch mode), Redis, Mongo Express
+#
+# Uso:
+#   docker compose -f docker-compose.dev.yml up        # Iniciar todo
+#   docker compose -f docker-compose.dev.yml up api     # Solo API
+#   docker compose -f docker-compose.dev.yml logs -f   # Ver logs
+#   docker compose -f docker-compose.dev.yml down -v   # Parar y borrar volúmenes
+#
+# Requiere: .env en la raíz del proyecto (copia de .env.example)
+
+name: payments-dev
+
+services:
+  # ── Redis ────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: payments-dev-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-dev-data:/data
+    command: redis-server --save 60 1 --loglevel notice
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── API — hot reload con ts-node-dev ─────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder       # Usar el stage de build (tiene devDependencies)
+    container_name: payments-dev-api
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      # Montar src para hot reload — los cambios se reflejan inmediatamente
+      - ./src:/app/src:ro
+      - ./.env:/app/.env:ro
+    ports:
+      - "${PORT:-3001}:3001"
+      - "9229:9229"          # Puerto de debugging Node.js (--inspect)
+    environment:
+      NODE_ENV: development
+      REDIS_URL: redis://redis:6379
+    env_file:
+      - .env
+    command: >
+      sh -c "npm run dev"
+    restart: unless-stopped
+
+  # ── Worker — hot reload con ts-node-dev ──────────────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+      target: builder
+    container_name: payments-dev-worker
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src:ro
+      - ./.env:/app/.env:ro
+    environment:
+      NODE_ENV: development
+      REDIS_URL: redis://redis:6379
+    env_file:
+      - .env
+    command: >
+      sh -c "npm run dev:worker"
+    restart: unless-stopped
+
+  # ── Redis Commander (UI para Redis en dev) ───────────────────────────────
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: payments-dev-redis-ui
+    depends_on:
+      - redis
+    ports:
+      - "8081:8081"
+    environment:
+      REDIS_HOSTS: "local:redis:6379"
+      HTTP_USER: admin
+      HTTP_PASSWORD: devpassword123
+    restart: unless-stopped
+    profiles:
+      - tools        # Solo inicia con: docker compose --profile tools up
+
+volumes:
+  redis-dev-data:
+    driver: local
