@@ -1,461 +1,180 @@
-# 🤖 Telegram Bot + PayPal Subscriptions
+# Trelk Payments
 
-Integración completa de un bot de Telegram con PayPal Subscriptions para gestionar suscripciones automáticas.
+![NestJS](https://img.shields.io/badge/NestJS-10-E0234E?style=flat-square&logo=nestjs)
+![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?style=flat-square&logo=typescript)
+![PayPal](https://img.shields.io/badge/PayPal-Subscriptions-003087?style=flat-square&logo=paypal)
+![BullMQ](https://img.shields.io/badge/BullMQ-5-red?style=flat-square)
+![Redis](https://img.shields.io/badge/Redis-7-DC382D?style=flat-square&logo=redis)
+![MongoDB](https://img.shields.io/badge/MongoDB-8-47A248?style=flat-square&logo=mongodb)
+![Docker](https://img.shields.io/badge/Docker-ready-2496ED?style=flat-square&logo=docker)
+![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)
 
-## 📋 Características
+Microservicio de pagos para el ecosistema Trelk. Gestiona el ciclo de vida completo de suscripciones PayPal — desde el checkout hasta la reconciliación automática — con workers desacoplados y notificaciones vía Telegram.
 
-✅ **Suscripciones automáticas** - Cobro mensual/anual sin intervención manual
-✅ **Webhook de PayPal** - Sincronización automática de eventos
-✅ **Base de datos SQLite** - Registro de usuarios y suscripciones
-✅ **Bot de Telegram** - Notificaciones y comandos para usuarios
-✅ **Panel HTML** - Página de checkout con SDK de PayPal
-✅ **Seguridad** - Verificación de firmas y autorización
+---
 
-## 🚀 Instalación Rápida
+## 🧠 ¿Qué problema resuelve?
 
-### 1. Configuración de PayPal
+Trelk necesita cobrar suscripciones recurrentes a usuarios de Telegram sin intervención manual. Este servicio centraliza:
 
-#### a) Crear aplicación en PayPal Developer
+- Creación y activación de planes PayPal desde código
+- Recepción y verificación de webhooks PayPal con firma HMAC
+- Sincronización de estado de suscripción en MongoDB
+- Notificaciones automáticas al usuario por Telegram (activación, fallo, cancelación)
+- Reconciliación periódica de estados divergentes (cron job)
+- Worker separado para procesamiento asíncrono de eventos de pago
 
-1. Ir a [developer.paypal.com](https://developer.paypal.com)
-2. Crear una **App** en Sandbox
-3. Obtener:
-   - `PAYPAL_CLIENT_ID`
-   - `PAYPAL_CLIENT_SECRET`
+---
 
-#### b) Crear Producto y Plan
+## ⚙️ Tech Stack
 
-```bash
-# Opción 1: Usar script (si existe)
-node scripts/create-paypal-plan.js
+| Capa | Tecnología | Por qué |
+|---|---|---|
+| Framework | NestJS 10 + Express | DI estructurado, modular, testeable |
+| Lenguaje | TypeScript 5 | Type safety entre capas |
+| Pagos | PayPal Server SDK v2 | Subscriptions API oficial |
+| Base de datos | MongoDB 8 + Mongoose | Historial de transacciones flexible |
+| Colas | BullMQ 5 + Redis 7 | Worker desacoplado, retries automáticos |
+| Notificaciones | Telegram Bot API | Comunicación directa con el usuario final |
+| Rate limiting | @nestjs/throttler | Protección de endpoints públicos |
+| Dashboard colas | Bull Board | Monitoreo de jobs en `/queues` |
+| Infra | Docker + PM2 | Contenedores o bare-metal con clustering |
 
-# Opción 2: Dashboard PayPal
-# 1. Ir a Products → Catalogs
-# 2. Crear producto: "Premium Bot Access"
-# 3. Crear plan: $10 USD/mes
-# 4. Copiar PLAN_ID
+---
+
+## 🏗 Arquitectura
+
+```
+┌──────────────────────────────────────────┐
+│           PayPal Webhooks                │
+│  (BILLING.SUBSCRIPTION.* events)        │
+└──────────────┬───────────────────────────┘
+               │ POST /paypal/webhook (HMAC verified)
+┌──────────────▼───────────────────────────┐
+│         NestJS API (port 3001)           │
+│                                          │
+│  ┌─────────────┐  ┌────────────────────┐│
+│  │  PayPal     │  │   Subscription     ││
+│  │  Module     │  │   Module           ││
+│  │  (webhook + │  │  (CRUD + lifecycle) ││
+│  │   checkout) │  └────────────────────┘│
+│  └──────┬──────┘  ┌────────────────────┐│
+│         │         │   Reconciliation   ││
+│         │         │   (cron diario)    ││
+│         │         └────────────────────┘│
+└─────────┼────────────────────────────────┘
+          │ BullMQ jobs
+┌─────────▼────────────────────────────────┐
+│        Worker Process (worker.ts)        │
+│   Procesa eventos de pago en background  │
+└─────────┬────────────────────────────────┘
+          │
+┌─────────▼──────────┐   ┌─────────────────┐
+│     MongoDB        │   │  Telegram Bot   │
+│  (subscriptions,   │   │  (notificaciones│
+│   transactions)    │   │   al usuario)   │
+└────────────────────┘   └─────────────────┘
 ```
 
-**Variables necesarias:**
-- `PAYPAL_PLAN_ID` - ID del plan creado
-- `PAYPAL_WEBHOOK_ID` - Lo obtendrás al crear el webhook
+---
 
-#### c) Configurar Webhook
+## 🔥 Características
 
-1. En [developer.paypal.com](https://developer.paypal.com) → Webhooks
-2. Crear webhook con URL: `https://tu-dominio.com/paypal/webhook`
-3. Seleccionar eventos:
-   - `BILLING.SUBSCRIPTION.ACTIVATED`
-   - `BILLING.SUBSCRIPTION.CANCELLED`
-   - `BILLING.SUBSCRIPTION.SUSPENDED`
-   - `BILLING.SUBSCRIPTION.RE_ACTIVATED`
-   - `PAYMENT.BILLING.SUBSCRIPTION.PAYMENT.FAILED`
-4. Copiar `WEBHOOK_ID`
+- **Webhook PayPal verificado** — validación de firma HMAC antes de procesar cualquier evento
+- **Worker desacoplado** — proceso separado consume la cola BullMQ; la API nunca bloquea en pagos
+- **Reconciliación automática** — cron job diario detecta y corrige suscripciones con estado divergente entre PayPal y MongoDB
+- **Notificaciones Telegram** — el usuario recibe confirmación inmediata de activación, fallo o cancelación
+- **Bull Board** — dashboard en `/queues` para monitorear jobs activos, fallidos y completados
+- **Rate limiting** — throttling por IP en todos los endpoints públicos
+- **Helmet** — security headers HTTP en producción
+- **Escalado horizontal** — workers escalables con `docker compose scale worker=N` o `pm2 cluster mode`
 
-### 2. Configuración de Telegram Bot
+---
 
-1. Hablar con [@BotFather](https://t.me/botfather)
-2. `/newbot` y seguir instrucciones
-3. Copiar el `TOKEN`
+## 🧪 Cómo ejecutar
 
-**Variable necesaria:**
-- `TELEGRAM_BOT_TOKEN` - Token del bot
-
-### 3. Variables de Entorno
-
-Copiar `.env.example` a `.env` y llenar:
+### Docker (recomendado)
 
 ```bash
 cp .env.example .env
-```
+# Editar .env con credenciales reales de PayPal y Telegram
 
-Editar `.env`:
-
-```env
-# PayPal Config
-PAYPAL_MODE=sandbox                    # o 'live' para producción
-PAYPAL_CLIENT_ID=YOUR_CLIENT_ID
-PAYPAL_CLIENT_SECRET=YOUR_SECRET
-PAYPAL_PLAN_ID=P-XXXXX                # Obtenido de PayPal
-PAYPAL_WEBHOOK_ID=XXXXX               # Obtenido de PayPal
-
-# Telegram Config
-TELEGRAM_BOT_TOKEN=YOUR_BOT_TOKEN
-
-# Server Config
-PORT=3001
-NODE_ENV=development
-BASE_URL=http://localhost:3001        # En producción: https://tu-dominio.com
-
-# Database
-DATABASE_URL=sqlite:./data/app.db
-```
-
-### 4. Instalación y Ejecución
-
-```bash
-# Instalar dependencias
-npm install
-
-# Crear base de datos
-mkdir -p data
-
-# Desarrollo (con watch)
-npm run dev
+# Desarrollo
+docker compose -f docker-compose.dev.yml up
 
 # Producción
-npm run build
-npm start
+docker compose -f docker-compose.prod.yml up -d
+
+# Escalar workers
+docker compose -f docker-compose.prod.yml scale worker=4
 ```
 
-## 📚 Estructura del Proyecto
-
-```
-tg-paypal-bot/
-├── src/
-│   ├── paypal/                 # Servicio PayPal API
-│   │   ├── paypal.service.ts   # Métodos para API de PayPal
-│   │   └── paypal.module.ts    # Módulo NestJS
-│   ├── telegram/               # Servicio Telegram Bot
-│   │   ├── telegram.service.ts # Métodos del bot
-│   │   └── telegram.module.ts  # Módulo NestJS
-│   ├── subscription/           # Lógica de suscripciones
-│   │   ├── subscription.service.ts
-│   │   └── subscription.module.ts
-│   ├── database/               # Modelos de datos
-│   │   ├── entities/
-│   │   │   ├── user.entity.ts
-│   │   │   ├── subscription.entity.ts
-│   │   │   └── index.ts
-│   ├── paypal.controller.ts    # Endpoints HTTP
-│   ├── app.module.ts           # Módulo principal
-│   └── main.ts                 # Punto de entrada
-├── data/                       # Base de datos SQLite (generada)
-├── .env.example                # Variables de ejemplo
-├── package.json
-├── tsconfig.json
-└── nest-cli.json
-```
-
-## 🔄 Flujo de Suscripción
-
-```
-Usuario Telegram
-    ↓
-Toca botón /premium
-    ↓
-Backend genera URL con tg_id
-    ↓
-Abre página en navegador
-    ↓
-Hace clic en "Suscribirse"
-    ↓
-Redirige a PayPal
-    ↓
-Usuario autoriza pago
-    ↓
-PayPal redirige a /success
-    ↓
-Backend guarda suscripción pendiente
-    ↓
-PayPal envía webhook ACTIVATED
-    ↓
-Backend activa en BD
-    ↓
-Telegram bot notifica ✅
-    ↓
-Usuario ya es premium
-```
-
-## 🛠️ API Endpoints
-
-### GET `/paypal/subscribe?tg_id=123456789`
-**Descripción:** Muestra página de suscripción con SDK de PayPal
-**Parámetros:**
-- `tg_id` (requerido): ID de Telegram del usuario
-
-**Respuesta:** HTML con formulario de PayPal
-
-### GET `/paypal/success?subscription_id=I-XXX&tg_id=123`
-**Descripción:** Confirmación de suscripción aprobada
-**Parámetros:**
-- `subscription_id`: ID de suscripción de PayPal
-- `tg_id`: ID de Telegram
-
-**Respuesta:** Página de éxito + redirige a BD
-
-### POST `/paypal/webhook`
-**Descripción:** Webhook de PayPal (automático)
-**Headers:**
-- `PayPal-Transmission-Id`
-- `PayPal-Transmission-Time`
-- `PayPal-Cert-Url`
-- `PayPal-Auth-Algo`
-- `PayPal-Transmission-Sig`
-
-**Body:** Evento de PayPal (JSON)
-
-**Eventos procesados:**
-- `BILLING.SUBSCRIPTION.ACTIVATED` - Activa premium
-- `BILLING.SUBSCRIPTION.CANCELLED` - Desactiva premium
-- `BILLING.SUBSCRIPTION.SUSPENDED` - Pausa premium
-- `BILLING.SUBSCRIPTION.RE_ACTIVATED` - Reactiva premium
-- `PAYMENT.BILLING.SUBSCRIPTION.PAYMENT.FAILED` - Notifica error
-
-### GET `/paypal/status?tg_id=123456789`
-**Descripción:** Obtiene estado de suscripción del usuario
-**Parámetros:**
-- `tg_id` (requerido): ID de Telegram
-
-**Respuesta:**
-```json
-{
-  "telegramId": 123456789,
-  "isPremium": true,
-  "activeSubscriptions": 1,
-  "subscriptions": [
-    {
-      "id": "I-XXXXX",
-      "status": "ACTIVE",
-      "amount": 10,
-      "currency": "USD",
-      "createdAt": "2025-01-01T00:00:00Z"
-    }
-  ]
-}
-```
-
-### POST `/paypal/cancel`
-**Descripción:** Cancela una suscripción
-**Body:**
-```json
-{
-  "tg_id": 123456789,
-  "subscription_id": "I-XXXXX"
-}
-```
-
-**Respuesta:**
-```json
-{
-  "status": "cancelled"
-}
-```
-
-## 🤖 Comandos del Bot de Telegram
-
-| Comando | Descripción |
-|---------|-------------|
-| `/start` | Muestra bienvenida y opciones |
-| `/premium` | Abre página de suscripción |
-| `/status` | Muestra estado actual del usuario |
-| `/help` | Muestra información de ayuda |
-
-## 🔐 Seguridad
-
-### Verificación de Webhooks
-
-PayPal firma todos los webhooks. El sistema verifica automáticamente:
-
-```typescript
-const isValid = await this.paypalService.verifyWebhookSignature(
-  webhookId,
-  webhookEvent
-);
-```
-
-### Autenticación
-
-- **Webhooks:** Verificación de firma de PayPal
-- **Cancelación:** Solo el propietario de la suscripción puede cancelar
-- **Datos:** IDs de Telegram protegidos en custom_id
-
-### Base de Datos
-
-- SQLite (cifra con contraseña en producción)
-- Relaciones uno-a-muchos (Usuario → Suscripciones)
-- Timestamps de creación y actualización
-
-## 📝 Ejemplos de Uso
-
-### Enviar botón de suscripción a usuario
-
-```typescript
-const telegramService = app.get(TelegramService);
-
-await telegramService.sendPremiumButton(null, userId);
-```
-
-### Verificar si usuario es premium
-
-```typescript
-const subscriptionService = app.get(SubscriptionService);
-
-const isPremium = await subscriptionService.getUserPremiumStatus(userId);
-```
-
-### Obtener suscripciones activas
-
-```typescript
-const subscriptions = await subscriptionService.getUserActiveSubscriptions(userId);
-```
-
-### Cancelar desde código
-
-```typescript
-const paypalService = app.get(PaypalService);
-
-await paypalService.cancelSubscription(subscriptionId);
-```
-
-## 🧪 Testing en Sandbox
-
-### 1. Crear cuenta PayPal de prueba
-
-- Ir a [developer.paypal.com](https://developer.paypal.com)
-- Tools → Accounts
-- Crear comprador y vendedor
-
-### 2. Testear flujo completo
-
-1. Ir a `http://localhost:3001/paypal/subscribe?tg_id=123456789`
-2. Hacer clic en botón
-3. Usar credenciales de Sandbox
-4. Completar pago
-5. Ver webhook en Logs de PayPal
-
-### 3. Simular eventos de webhook
+### Local
 
 ```bash
-curl -X POST http://localhost:3001/paypal/webhook \
-  -H "Content-Type: application/json" \
-  -d '{
-    "event_type": "BILLING.SUBSCRIPTION.ACTIVATED",
-    "resource": {
-      "id": "I-TEST123",
-      "custom_id": "telegram_123456789",
-      "status": "ACTIVE"
-    }
-  }'
-```
+npm install
+cp .env.example .env
 
-## 📊 Base de Datos
+# API + Worker en paralelo (con hot reload)
+npm run dev:all
 
-### Tabla: users
-```sql
-CREATE TABLE users (
-  id UUID PRIMARY KEY,
-  telegramId BIGINT UNIQUE NOT NULL,
-  telegramUsername VARCHAR,
-  firstName VARCHAR,
-  lastName VARCHAR,
-  paypalPayerId VARCHAR,
-  tier VARCHAR DEFAULT 'free',
-  isPremium BOOLEAN DEFAULT FALSE,
-  createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-```
-
-### Tabla: subscriptions
-```sql
-CREATE TABLE subscriptions (
-  id UUID PRIMARY KEY,
-  paypalSubscriptionId VARCHAR UNIQUE NOT NULL,
-  planId VARCHAR NOT NULL,
-  status VARCHAR DEFAULT 'APPROVAL_PENDING',
-  paypalPayerId VARCHAR,
-  amount DECIMAL(10, 2),
-  currency VARCHAR,
-  nextBillingDate DATETIME,
-  cancelledAt DATETIME,
-  userId UUID NOT NULL REFERENCES users(id),
-  createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-```
-
-## 🚀 Deploy en Producción
-
-### 1. Cambiar a modo Live
-
-En `.env`:
-```env
-PAYPAL_MODE=live
-BASE_URL=https://tu-dominio.com
-NODE_ENV=production
-```
-
-### 2. Configurar dominio
-
-```bash
-# Actualizar webhook en PayPal
-https://tu-dominio.com/paypal/webhook
-
-# Actualizar token de Telegram
-# Bot → Token debe ser válido
-```
-
-### 3. Usar base de datos persistente
-
-```env
-# En lugar de SQLite, usar PostgreSQL
-DATABASE_URL=postgresql://user:pass@host:5432/db
-```
-
-### 4. Variables de entorno seguras
-
-```bash
-# En servidor (no en .env)
-export PAYPAL_CLIENT_ID=xxx
-export PAYPAL_CLIENT_SECRET=xxx
-export TELEGRAM_BOT_TOKEN=xxx
-export PAYPAL_WEBHOOK_ID=xxx
-```
-
-### 5. Usar PM2 o similar
-
-```bash
-pm2 start dist/main.js --name "tg-paypal-bot"
-pm2 save
-pm2 startup
-```
-
-## 🐛 Troubleshooting
-
-### Error: "Invalid webhook signature"
-
-**Solución:** Esperar a que PayPal propague el webhook ID (puede tardar minutos)
-
-### Usuario no recibe notificación de Telegram
-
-**Verificar:**
-- Token de bot es válido: `curl https://api.telegram.org/botTOKEN/getMe`
-- Chat ID es correcto
-- Bot no está bloqueado por el usuario
-
-### Suscripción no se activa
-
-**Verificar:**
-- `PAYPAL_WEBHOOK_ID` es correcto
-- Webhook está registrado en PayPal
-- Network tab muestra respuesta 200 del servidor
-
-### Error de base de datos
-
-**Solución:**
-```bash
-rm -rf data/app.db
+# Solo API
 npm run dev
+
+# Solo Worker
+npm run dev:worker
 ```
 
-## 📞 Soporte
+### PM2 (bare-metal producción)
 
-Para reportar errores o sugerencias:
-- Abrir issue en GitHub
-- Contactar a: support@example.com
+```bash
+npm run build
+npm run pm2:start
+npm run pm2:monit
+```
+
+---
+
+## 🔑 Variables de entorno
+
+| Variable | Descripción | Requerida |
+|---|---|---|
+| `NODE_ENV` | `development` / `production` | ✅ |
+| `PORT` | Puerto de la API (default: 3001) | — |
+| `PAYPAL_MODE` | `sandbox` / `live` | ✅ |
+| `PAYPAL_CLIENT_ID` | Client ID de la app PayPal | ✅ |
+| `PAYPAL_CLIENT_SECRET` | Client secret de la app PayPal | ✅ |
+| `PAYPAL_PLAN_ID` | ID del plan de suscripción | ✅ |
+| `PAYPAL_WEBHOOK_ID` | ID del webhook registrado en PayPal | ✅ |
+| `TELEGRAM_BOT_TOKEN` | Token del bot notificador | ✅ |
+| `MONGODB_URI_PAYMENTS` | URI de conexión MongoDB (pagos) | ✅ |
+| `MONGODB_URI_MBOTS` | URI de conexión MongoDB (usuarios) | ✅ |
+| `REDIS_URL` | URL de Redis para BullMQ | ✅ |
+| `REDIS_PASSWORD` | Contraseña Redis (producción) | — |
+| `EXTERNAL_API_KEY` | API key para endpoints internos | ✅ |
+| `BASE_URL` | URL pública del servicio | ✅ |
+| `ALLOWED_ORIGINS` | Orígenes CORS permitidos | ✅ |
+| `BULL_BOARD_ENABLED` | Activar dashboard de colas | — |
+| `BULL_BOARD_USERNAME` | Usuario del dashboard | — |
+| `BULL_BOARD_PASSWORD` | Contraseña del dashboard | — |
+
+Ver `.env.example` para la lista completa.
+
+---
+
+## 🧠 Decisiones técnicas
+
+**API + Worker como procesos separados** — el proceso worker consume la cola BullMQ de forma independiente. Si el worker falla, la API sigue funcionando; los jobs se re-encolan automáticamente con backoff exponencial.
+
+**BullMQ sobre llamadas síncronas a PayPal** — los webhooks de PayPal deben responder en < 5s o PayPal reintenta. Encolando el procesamiento real en BullMQ la API responde 200 inmediatamente y el worker procesa sin presión.
+
+**Reconciliación diaria** — PayPal puede enviar eventos fuera de orden o duplicados. El cron de reconciliación consulta directamente la Subscriptions API y corrige cualquier estado divergente en MongoDB.
+
+**MongoDB sobre SQL** — el historial de transacciones y los metadatos de suscripción son documentos semi-estructurados (distintos por tipo de evento). MongoDB evita migraciones de esquema ante cambios en el payload de PayPal.
+
+---
 
 ## 📄 Licencia
 
-MIT
-# page
+MIT © Trelk
+
