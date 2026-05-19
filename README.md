@@ -9,40 +9,40 @@
 ![Docker](https://img.shields.io/badge/Docker-ready-2496ED?style=flat-square&logo=docker)
 ![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)
 
-Microservicio de pagos para el ecosistema Trelk. Gestiona el ciclo de vida completo de suscripciones PayPal — desde el checkout hasta la reconciliación automática — con workers desacoplados y notificaciones vía Telegram.
+Payment microservice for the Trelk ecosystem. Manages the complete lifecycle of PayPal subscriptions — from checkout to automatic reconciliation — with decoupled workers and Telegram notifications.
 
 ---
 
-## 🧠 ¿Qué problema resuelve?
+## 🧠 What problem does it solve?
 
-Trelk necesita cobrar suscripciones recurrentes a usuarios de Telegram sin intervención manual. Este servicio centraliza:
+Trelk needs to charge recurring subscriptions to Telegram users without manual intervention. This service centralizes:
 
-- Creación y activación de planes PayPal desde código
-- Recepción y verificación de webhooks PayPal con firma HMAC
-- Sincronización de estado de suscripción en MongoDB
-- Notificaciones automáticas al usuario por Telegram (activación, fallo, cancelación)
-- Reconciliación periódica de estados divergentes (cron job)
-- Worker separado para procesamiento asíncrono de eventos de pago
+- Creation and activation of PayPal plans from code
+- Reception and verification of PayPal webhooks with HMAC signature
+- Subscription state synchronization in MongoDB
+- Automatic user notifications via Telegram (activation, failure, cancellation)
+- Periodic reconciliation of divergent states (cron job)
+- Separate worker for asynchronous payment event processing
 
 ---
 
 ## ⚙️ Tech Stack
 
-| Capa | Tecnología | Por qué |
+| Layer | Technology | Why |
 |---|---|---|
-| Framework | NestJS 10 + Express | DI estructurado, modular, testeable |
-| Lenguaje | TypeScript 5 | Type safety entre capas |
-| Pagos | PayPal Server SDK v2 | Subscriptions API oficial |
-| Base de datos | MongoDB 8 + Mongoose | Historial de transacciones flexible |
-| Colas | BullMQ 5 + Redis 7 | Worker desacoplado, retries automáticos |
-| Notificaciones | Telegram Bot API | Comunicación directa con el usuario final |
-| Rate limiting | @nestjs/throttler | Protección de endpoints públicos |
-| Dashboard colas | Bull Board | Monitoreo de jobs en `/queues` |
-| Infra | Docker + PM2 | Contenedores o bare-metal con clustering |
+| Framework | NestJS 10 + Express | Structured DI, modular, testable |
+| Language | TypeScript 5 | Type safety across layers |
+| Payments | PayPal Server SDK v2 | Official Subscriptions API |
+| Database | MongoDB 8 + Mongoose | Flexible transaction history |
+| Queues | BullMQ 5 + Redis 7 | Decoupled worker, automatic retries |
+| Notifications | Telegram Bot API | Direct communication with end user |
+| Rate limiting | @nestjs/throttler | Public endpoint protection |
+| Queue dashboard | Bull Board | Job monitoring at `/queues` |
+| Infrastructure | Docker + PM2 | Containers or bare-metal clustering |
 
 ---
 
-## 🏗 Arquitectura
+## 🏗 Architecture
 
 ```
 ┌──────────────────────────────────────────┐
@@ -60,52 +60,52 @@ Trelk necesita cobrar suscripciones recurrentes a usuarios de Telegram sin inter
 │  │   checkout) │  └────────────────────┘│
 │  └──────┬──────┘  ┌────────────────────┐│
 │         │         │   Reconciliation   ││
-│         │         │   (cron diario)    ││
+│         │         │   (daily cron)     ││
 │         │         └────────────────────┘│
 └─────────┼────────────────────────────────┘
           │ BullMQ jobs
 ┌─────────▼────────────────────────────────┐
 │        Worker Process (worker.ts)        │
-│   Procesa eventos de pago en background  │
+│   Processes payment events in background │
 └─────────┬────────────────────────────────┘
           │
 ┌─────────▼──────────┐   ┌─────────────────┐
 │     MongoDB        │   │  Telegram Bot   │
-│  (subscriptions,   │   │  (notificaciones│
-│   transactions)    │   │   al usuario)   │
+│  (subscriptions,   │   │  (send           │
+│   transactions)    │   │   notifications) │
 └────────────────────┘   └─────────────────┘
 ```
 
 ---
 
-## 🔥 Características
+## 🔥 Features
 
-- **Webhook PayPal verificado** — validación de firma HMAC antes de procesar cualquier evento
-- **Worker desacoplado** — proceso separado consume la cola BullMQ; la API nunca bloquea en pagos
-- **Reconciliación automática** — cron job diario detecta y corrige suscripciones con estado divergente entre PayPal y MongoDB
-- **Notificaciones Telegram** — el usuario recibe confirmación inmediata de activación, fallo o cancelación
-- **Bull Board** — dashboard en `/queues` para monitorear jobs activos, fallidos y completados
-- **Rate limiting** — throttling por IP en todos los endpoints públicos
-- **Helmet** — security headers HTTP en producción
-- **Escalado horizontal** — workers escalables con `docker compose scale worker=N` o `pm2 cluster mode`
+- **Verified PayPal webhook** — HMAC signature validation before processing any event
+- **Decoupled worker** — separate process consumes BullMQ queue; API never blocks on payments
+- **Automatic reconciliation** — daily cron detects and fixes subscriptions with divergent state between PayPal and MongoDB
+- **Telegram notifications** — user receives immediate confirmation of activation, failure, or cancellation
+- **Bull Board** — dashboard at `/queues` to monitor active, failed, and completed jobs
+- **Rate limiting** — per-IP throttling on all public endpoints
+- **Helmet** — HTTP security headers in production
+- **Horizontal scaling** — workers scalable with `docker compose scale worker=N` or `pm2 cluster mode`
 
 ---
 
-## 🧪 Cómo ejecutar
+## 🧪 How to run
 
-### Docker (recomendado)
+### Docker (recommended)
 
 ```bash
 cp .env.example .env
-# Editar .env con credenciales reales de PayPal y Telegram
+# Edit .env with real PayPal and Telegram credentials
 
-# Desarrollo
+# Development
 docker compose -f docker-compose.dev.yml up
 
-# Producción
+# Production
 docker compose -f docker-compose.prod.yml up -d
 
-# Escalar workers
+# Scale workers
 docker compose -f docker-compose.prod.yml scale worker=4
 ```
 
@@ -115,17 +115,17 @@ docker compose -f docker-compose.prod.yml scale worker=4
 npm install
 cp .env.example .env
 
-# API + Worker en paralelo (con hot reload)
+# API + Worker in parallel (with hot reload)
 npm run dev:all
 
-# Solo API
+# API only
 npm run dev
 
-# Solo Worker
+# Worker only
 npm run dev:worker
 ```
 
-### PM2 (bare-metal producción)
+### PM2 (bare-metal production)
 
 ```bash
 npm run build
@@ -135,46 +135,46 @@ npm run pm2:monit
 
 ---
 
-## 🔑 Variables de entorno
+## 🔑 Environment variables
 
-| Variable | Descripción | Requerida |
+| Variable | Description | Required |
 |---|---|---|
 | `NODE_ENV` | `development` / `production` | ✅ |
-| `PORT` | Puerto de la API (default: 3001) | — |
+| `PORT` | API port (default: 3001) | — |
 | `PAYPAL_MODE` | `sandbox` / `live` | ✅ |
-| `PAYPAL_CLIENT_ID` | Client ID de la app PayPal | ✅ |
-| `PAYPAL_CLIENT_SECRET` | Client secret de la app PayPal | ✅ |
-| `PAYPAL_PLAN_ID` | ID del plan de suscripción | ✅ |
-| `PAYPAL_WEBHOOK_ID` | ID del webhook registrado en PayPal | ✅ |
-| `TELEGRAM_BOT_TOKEN` | Token del bot notificador | ✅ |
-| `MONGODB_URI_PAYMENTS` | URI de conexión MongoDB (pagos) | ✅ |
-| `MONGODB_URI_MBOTS` | URI de conexión MongoDB (usuarios) | ✅ |
-| `REDIS_URL` | URL de Redis para BullMQ | ✅ |
-| `REDIS_PASSWORD` | Contraseña Redis (producción) | — |
-| `EXTERNAL_API_KEY` | API key para endpoints internos | ✅ |
-| `BASE_URL` | URL pública del servicio | ✅ |
-| `ALLOWED_ORIGINS` | Orígenes CORS permitidos | ✅ |
-| `BULL_BOARD_ENABLED` | Activar dashboard de colas | — |
-| `BULL_BOARD_USERNAME` | Usuario del dashboard | — |
-| `BULL_BOARD_PASSWORD` | Contraseña del dashboard | — |
+| `PAYPAL_CLIENT_ID` | Client ID from PayPal app | ✅ |
+| `PAYPAL_CLIENT_SECRET` | Client secret from PayPal app | ✅ |
+| `PAYPAL_PLAN_ID` | Subscription plan ID | ✅ |
+| `PAYPAL_WEBHOOK_ID` | Webhook ID registered in PayPal | ✅ |
+| `TELEGRAM_BOT_TOKEN` | Notification bot token | ✅ |
+| `MONGODB_URI_PAYMENTS` | MongoDB connection URI (payments) | ✅ |
+| `MONGODB_URI_MBOTS` | MongoDB connection URI (users) | ✅ |
+| `REDIS_URL` | Redis URL for BullMQ | ✅ |
+| `REDIS_PASSWORD` | Redis password (production) | — |
+| `EXTERNAL_API_KEY` | API key for internal endpoints | ✅ |
+| `BASE_URL` | Public service URL | ✅ |
+| `ALLOWED_ORIGINS` | Allowed CORS origins | ✅ |
+| `BULL_BOARD_ENABLED` | Enable queue dashboard | — |
+| `BULL_BOARD_USERNAME` | Dashboard username | — |
+| `BULL_BOARD_PASSWORD` | Dashboard password | — |
 
-Ver `.env.example` para la lista completa.
-
----
-
-## 🧠 Decisiones técnicas
-
-**API + Worker como procesos separados** — el proceso worker consume la cola BullMQ de forma independiente. Si el worker falla, la API sigue funcionando; los jobs se re-encolan automáticamente con backoff exponencial.
-
-**BullMQ sobre llamadas síncronas a PayPal** — los webhooks de PayPal deben responder en < 5s o PayPal reintenta. Encolando el procesamiento real en BullMQ la API responde 200 inmediatamente y el worker procesa sin presión.
-
-**Reconciliación diaria** — PayPal puede enviar eventos fuera de orden o duplicados. El cron de reconciliación consulta directamente la Subscriptions API y corrige cualquier estado divergente en MongoDB.
-
-**MongoDB sobre SQL** — el historial de transacciones y los metadatos de suscripción son documentos semi-estructurados (distintos por tipo de evento). MongoDB evita migraciones de esquema ante cambios en el payload de PayPal.
+See `.env.example` for the complete list.
 
 ---
 
-## 📄 Licencia
+## 🧠 Technical decisions
+
+**API + Worker as separate processes** — the worker process consumes the BullMQ queue independently. If the worker fails, the API continues running; jobs are automatically re-queued with exponential backoff.
+
+**BullMQ over synchronous PayPal calls** — PayPal webhooks must respond in < 5s or PayPal retries. By queuing the actual processing in BullMQ the API responds 200 immediately and the worker processes without pressure.
+
+**Daily reconciliation** — PayPal may send events out of order or duplicated. The reconciliation cron queries the Subscriptions API directly and fixes any divergent state in MongoDB.
+
+**MongoDB over SQL** — transaction history and subscription metadata are semi-structured documents (vary by event type). MongoDB avoids schema migrations on PayPal payload changes.
+
+---
+
+## 📄 License
 
 MIT © Trelk
 
