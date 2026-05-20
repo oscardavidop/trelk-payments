@@ -19,6 +19,7 @@ import { CancelSubscriptionDto } from './dto/cancel-subscription.dto';
 import { CreateSubscriptionDto } from './dto/create-subscription.dto';
 import { ReviseSubscriptionDto } from './dto/revise-subscription.dto';
 import { ResumeSubscriptionDto } from './dto/resume-subscription.dto';
+import { AutoRenewSubscriptionDto } from './dto/auto-renew-subscription.dto';
 import { PaypalWebhookProducer } from '../queues/paypal-webhook.producer';
 import { RedisService } from '../redis/redis.service';
 import { WEBHOOK_DONE_PREFIX } from '../queues/paypal-webhook.types';
@@ -333,6 +334,7 @@ export class PaypalController {
         body.return_url,
         body.cancel_url,
         String(body.tg_id),
+        body.start_time,
       );
 
       // Pre-registrar en DB para que el webhook pueda correlacionarla
@@ -500,6 +502,81 @@ export class PaypalController {
       }
       this.logger.error(`Failed to resume subscription ${body.subscription_id}: ${error?.message}`);
       throw new HttpException('Failed to resume subscription', HttpStatus.BAD_GATEWAY);
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // AUTO-RENEW — suspend / activate según preferencia del usuario
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Activa o desactiva la renovación automática de una suscripción.
+   * POST /paypal/subscription/auto-renew
+   *
+   * auto_renew = false → PayPal suspend (pausa pagos, mantiene acceso)
+   * auto_renew = true  → PayPal activate (reanuda pagos)
+   *
+   * Según los docs oficiales de PayPal:
+   * - suspend:  POST /v1/billing/subscriptions/{id}/suspend
+   * - activate: POST /v1/billing/subscriptions/{id}/activate
+   */
+  @Post('subscription/auto-renew')
+  async setAutoRenew(@Body() body: AutoRenewSubscriptionDto, @Req() req: any) {
+    const authorization = req.headers['authorization'] as string | undefined;
+    const expectedKey = `Bearer ${this.requireEnv('EXTERNAL_API_KEY')}`;
+    if (!this.timingSafeEqual(authorization ?? '', expectedKey)) {
+      throw new UnauthorizedException('Invalid API key');
+    }
+
+    const subscription = await this.subscriptionService.getSubscriptionByPaypalId(
+      body.subscription_id,
+    );
+    if (!subscription) {
+      throw new BadRequestException('Subscription not found');
+    }
+    if (subscription.user_id !== String(body.tg_id)) {
+      this.logger.warn(
+        `AutoRenew attempt by non-owner: tg_id=${body.tg_id}, owner=${subscription.user_id}`,
+      );
+      throw new UnauthorizedException('You do not own this subscription');
+    }
+
+    try {
+      if (body.auto_renew) {
+        // Reactivar: solo si está suspendida
+        if (subscription.status !== 'SUSPENDED') {
+          throw new BadRequestException(
+            `Cannot activate a subscription in ${subscription.status} status`,
+          );
+        }
+        await this.paypalService.activateSubscription(body.subscription_id);
+        await this.subscriptionService.resumeSubscription(body.subscription_id);
+        this.logger.log(`Auto-renew enabled (activated): ${body.subscription_id} (user ${body.tg_id})`);
+        return { ok: true, auto_renew: true, status: 'ACTIVE' };
+      } else {
+        // Suspender: solo si está activa
+        if (subscription.status !== 'ACTIVE') {
+          throw new BadRequestException(
+            `Cannot suspend a subscription in ${subscription.status} status`,
+          );
+        }
+        await this.paypalService.suspendSubscription(
+          body.subscription_id,
+          'Customer-requested pause',
+        );
+        await this.subscriptionService.suspendSubscription(body.subscription_id);
+        this.logger.log(`Auto-renew disabled (suspended): ${body.subscription_id} (user ${body.tg_id})`);
+        return { ok: true, auto_renew: false, status: 'SUSPENDED' };
+      }
+    } catch (error: any) {
+      if (
+        error instanceof BadRequestException ||
+        error instanceof UnauthorizedException
+      ) {
+        throw error;
+      }
+      this.logger.error(`Failed to set auto-renew for ${body.subscription_id}: ${error?.message}`);
+      throw new HttpException('Failed to update subscription renewal', HttpStatus.BAD_GATEWAY);
     }
   }
 

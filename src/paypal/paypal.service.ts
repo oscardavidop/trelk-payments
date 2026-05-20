@@ -369,6 +369,7 @@ export class PaypalService {
     returnUrl: string,
     cancelUrl: string,
     customId?: string,
+    startTime?: string,
   ): Promise<{ subscriptionId: string; approvalUrl: string }> {
     // Validación SSRF: las URLs deben ser HTTPS en producción
     this.assertSafeRedirectUrl(returnUrl);
@@ -396,6 +397,11 @@ export class PaypalService {
       // custom_id allows correlating the subscription to an internal user
       if (customId) {
         body.custom_id = customId;
+      }
+
+      // start_time defers the first billing cycle (used for re-subscription after cancel_at_period_end)
+      if (startTime) {
+        body.start_time = startTime;
       }
 
       const response = await this.axiosInstance.post('/v1/billing/subscriptions', body, {

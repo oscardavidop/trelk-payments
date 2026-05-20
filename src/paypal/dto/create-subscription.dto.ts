@@ -1,4 +1,4 @@
-import { IsInt, IsString, IsNotEmpty, IsUrl, Min, Matches, IsOptional } from 'class-validator';
+import { IsInt, IsString, IsNotEmpty, IsUrl, Min, Matches, IsOptional, IsDateString } from 'class-validator';
 import { Transform } from 'class-transformer';
 
 export class CreateSubscriptionDto {
@@ -12,7 +12,7 @@ export class CreateSubscriptionDto {
    */
   @IsString()
   @IsNotEmpty()
-  @Matches(/^P-[A-Z0-9]{16,}$/, {
+  @Matches(/^P-[A-Z0-9]{8,}$/, {
     message: 'plan_id must be a valid PayPal plan ID (P-...)',
   })
   plan_id: string;
@@ -24,4 +24,13 @@ export class CreateSubscriptionDto {
   /** URL de cancelación si el usuario abandona el flujo en PayPal */
   @IsUrl({ require_tld: false }, { message: 'cancel_url must be a valid URL' })
   cancel_url: string;
+
+  /**
+   * Fecha/hora de inicio de la suscripción en formato ISO 8601 UTC.
+   * Útil para re-suscripciones con period_end activo (evita doble cobro).
+   * Si se omite, la suscripción inicia en el momento de la aprobación.
+   */
+  @IsOptional()
+  @IsDateString({}, { message: 'start_time must be an ISO 8601 date string' })
+  start_time?: string;
 }

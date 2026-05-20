@@ -10,7 +10,7 @@ export class ResumeSubscriptionDto {
   /** PayPal subscription ID (I-...) a reanudar */
   @IsString()
   @IsNotEmpty()
-  @Matches(/^I-[A-Z0-9]{16,}$/, {
+  @Matches(/^I-[A-Z0-9]{8,}$/, {
     message: 'subscription_id must be a valid PayPal subscription ID (I-...)',
   })
   subscription_id: string;

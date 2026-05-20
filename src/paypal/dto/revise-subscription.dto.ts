@@ -10,7 +10,7 @@ export class ReviseSubscriptionDto {
   /** PayPal subscription ID actual (I-...) */
   @IsString()
   @IsNotEmpty()
-  @Matches(/^I-[A-Z0-9]{16,}$/, {
+  @Matches(/^I-[A-Z0-9]{8,}$/, {
     message: 'subscription_id must be a valid PayPal subscription ID (I-...)',
   })
   subscription_id: string;
@@ -18,7 +18,7 @@ export class ReviseSubscriptionDto {
   /** Nuevo plan (P-...) al que se quiere cambiar */
   @IsString()
   @IsNotEmpty()
-  @Matches(/^P-[A-Z0-9]{16,}$/, {
+  @Matches(/^P-[A-Z0-9]{8,}$/, {
     message: 'new_plan_id must be a valid PayPal plan ID (P-...)',
   })
   new_plan_id: string;
