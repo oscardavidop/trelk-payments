@@ -25,8 +25,6 @@ export class PaypalService {
     this.clientId = this.requireEnv('PAYPAL_CLIENT_ID');
     this.clientSecret = this.requireEnv('PAYPAL_CLIENT_SECRET');
 
-    // SEGURIDAD: NUNCA loguear clientId ni clientSecret
-    console.log(`[PayPalService] Initializing in ${process.env.PAYPAL_MODE === 'live' ? 'Production' : 'Sandbox'} mode`);
 
     // FIX: Usar variables de entorno, NO hardcodear credenciales
     this.client = new Client({
@@ -107,9 +105,28 @@ export class PaypalService {
       }
 
       // ── 4. Obtener nuevo token de PayPal ──────────────────────────────────
-      const token = await this.client.clientCredentialsAuthManager.fetchToken();
-      const accessToken = token.accessToken;
-      const expiresIn: number = (token as any).expiresIn ?? 3600;
+      // NOTA: @paypal/paypal-server-sdk tiene un bug conocido con BigInt al parsear
+      // la respuesta del token. Se usa axios directo al endpoint OAuth2 estándar.
+      const tokenUrl =
+        process.env.PAYPAL_MODE === 'live'
+          ? 'https://api-m.paypal.com/v1/oauth2/token'
+          : 'https://api-m.sandbox.paypal.com/v1/oauth2/token';
+
+      const credentials = Buffer.from(`${this.clientId}:${this.clientSecret}`).toString('base64');
+      const tokenRes = await axios.post(
+        tokenUrl,
+        'grant_type=client_credentials',
+        {
+          headers: {
+            Authorization: `Basic ${credentials}`,
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+          timeout: 15_000,
+        },
+      );
+
+      const accessToken: string = tokenRes.data.access_token;
+      const expiresIn: number = Number(tokenRes.data.expires_in) || 3600;
       const ttlSeconds = Math.max(expiresIn - 60, 30); // margen 60s, mínimo 30s
 
       // Guardar en Redis (compartido) y en memoria (fallback local)
@@ -118,7 +135,8 @@ export class PaypalService {
 
       return accessToken;
     } catch (error: any) {
-      console.error('[PayPalService] Error getting access token:', error?.message);
+      const detail = error?.response?.data ?? error?.message ?? String(error);
+      console.error('[PayPalService] Error getting access token:', JSON.stringify(detail));
       // Fallback in-memory si Redis/PayPal fallan
       if (this.fallbackToken) return this.fallbackToken;
       throw new HttpException('Failed to get PayPal access token', HttpStatus.INTERNAL_SERVER_ERROR);
@@ -334,6 +352,154 @@ export class PaypalService {
     } catch (error: any) {
       console.error('Error activating subscription:', error?.response?.data || error?.message);
       throw new HttpException('Failed to activate PayPal subscription', HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  /**
+   * Crea una suscripción en PayPal y devuelve el URL de aprobación.
+   * El usuario debe ser redirigido a este URL para completar el pago.
+   *
+   * @param planId      PayPal plan ID (P-...)
+   * @param returnUrl   URL al que PayPal redirige tras la aprobación
+   * @param cancelUrl   URL al que PayPal redirige si el usuario cancela
+   * @param customId    Identificador interno (ej: telegram user id) — viaja en webhooks
+   */
+  async createSubscriptionLink(
+    planId: string,
+    returnUrl: string,
+    cancelUrl: string,
+    customId?: string,
+  ): Promise<{ subscriptionId: string; approvalUrl: string }> {
+    // Validación SSRF: las URLs deben ser HTTPS en producción
+    this.assertSafeRedirectUrl(returnUrl);
+    this.assertSafeRedirectUrl(cancelUrl);
+
+    try {
+      const token = await this.getAccessToken();
+
+      const body: Record<string, any> = {
+        plan_id: planId,
+        application_context: {
+          brand_name: 'Trelk',
+          locale: 'en-US',
+          shipping_preference: 'NO_SHIPPING',
+          user_action: 'SUBSCRIBE_NOW',
+          payment_method: {
+            payer_selected: 'PAYPAL',
+            payee_preferred: 'IMMEDIATE_PAYMENT_REQUIRED',
+          },
+          return_url: returnUrl,
+          cancel_url: cancelUrl,
+        },
+      };
+
+      // custom_id allows correlating the subscription to an internal user
+      if (customId) {
+        body.custom_id = customId;
+      }
+
+      const response = await this.axiosInstance.post('/v1/billing/subscriptions', body, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          Prefer: 'return=representation',
+        },
+      });
+
+      const subscription = response.data;
+      const approveLink = (subscription.links as any[])?.find((l) => l.rel === 'approve');
+
+      if (!approveLink?.href) {
+        throw new HttpException(
+          'PayPal did not return an approval URL',
+          HttpStatus.BAD_GATEWAY,
+        );
+      }
+
+      return {
+        subscriptionId: subscription.id,
+        approvalUrl: approveLink.href,
+      };
+    } catch (error: any) {
+      if (error instanceof HttpException) throw error;
+      console.error('[PaypalService] createSubscriptionLink error:', error?.response?.data || error?.message);
+      throw new HttpException('Failed to create PayPal subscription', HttpStatus.BAD_GATEWAY);
+    }
+  }
+
+  /**
+   * Revisa (upgrade/downgrade) una suscripción existente a un nuevo plan.
+   *
+   * PayPal requiere que el suscriptor apruebe la revisión.
+   * Si `approvalUrl` es `null` el cambio fue automático (inusual).
+   *
+   * @returns approvalUrl  URL al que redirigir al usuario, o null si no se requiere aprobación
+   */
+  async reviseSubscriptionPlan(
+    subscriptionId: string,
+    newPlanId: string,
+    returnUrl: string,
+    cancelUrl: string,
+  ): Promise<{ approvalUrl: string | null }> {
+    this.assertSafeRedirectUrl(returnUrl);
+    this.assertSafeRedirectUrl(cancelUrl);
+
+    try {
+      const token = await this.getAccessToken();
+
+      const response = await this.axiosInstance.post(
+        `/v1/billing/subscriptions/${subscriptionId}/revise`,
+        {
+          plan_id: newPlanId,
+          application_context: {
+            brand_name: 'Trelk',
+            locale: 'en-US',
+            shipping_preference: 'NO_SHIPPING',
+            user_action: 'SUBSCRIBE_NOW',
+            return_url: returnUrl,
+            cancel_url: cancelUrl,
+          },
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+        },
+      );
+
+      const revised = response.data;
+      const approveLink = (revised.links as any[])?.find((l) => l.rel === 'approve');
+
+      return { approvalUrl: approveLink?.href ?? null };
+    } catch (error: any) {
+      if (error instanceof HttpException) throw error;
+      console.error('[PaypalService] reviseSubscriptionPlan error:', error?.response?.data || error?.message);
+      throw new HttpException('Failed to revise PayPal subscription', HttpStatus.BAD_GATEWAY);
+    }
+  }
+
+  /**
+   * Guarda SSRF: solo permite https en producción.
+   * Permite http://localhost y http://127.0.0.1 en modo sandbox.
+   */
+  private assertSafeRedirectUrl(url: string): void {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw new HttpException(`Invalid redirect URL: ${url}`, HttpStatus.BAD_REQUEST);
+    }
+
+    const isSandbox = process.env.PAYPAL_MODE !== 'live';
+    const isLocalhost =
+      parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
+
+    if (parsed.protocol !== 'https:' && !(isSandbox && isLocalhost)) {
+      throw new HttpException(
+        'Redirect URLs must use HTTPS in production',
+        HttpStatus.BAD_REQUEST,
+      );
     }
   }
 

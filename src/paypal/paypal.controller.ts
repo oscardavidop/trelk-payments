@@ -16,6 +16,9 @@ import { PaypalService } from './paypal.service';
 import { LoggerService } from '../common/logger.service';
 import { AttachSubscriptionDto } from './dto/attach-subscription.dto';
 import { CancelSubscriptionDto } from './dto/cancel-subscription.dto';
+import { CreateSubscriptionDto } from './dto/create-subscription.dto';
+import { ReviseSubscriptionDto } from './dto/revise-subscription.dto';
+import { ResumeSubscriptionDto } from './dto/resume-subscription.dto';
 import { PaypalWebhookProducer } from '../queues/paypal-webhook.producer';
 import { RedisService } from '../redis/redis.service';
 import { WEBHOOK_DONE_PREFIX } from '../queues/paypal-webhook.types';
@@ -238,6 +241,265 @@ export class PaypalController {
         'Failed to cancel subscription',
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // PLANES DISPONIBLES (público — sin datos sensibles)
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Lista los planes activos almacenados en MongoDB.
+   * GET /paypal/plans
+   *
+   * Endpoint público: solo devuelve name, plan_id y precio.
+   * NO expone IDs internos de Mongo, features completas, ni metadata sensible.
+   */
+  @Get('plans')
+  async listPlans() {
+    const plans = await this.subscriptionService.listActivePlans();
+    return { ok: true, plans };
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // ESTADO DE SUSCRIPCIÓN DEL USUARIO (server-to-server)
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Devuelve el estado completo de suscripción de un usuario.
+   * GET /paypal/user-status?tg_id=...
+   *
+   * Protegido por API key interna. La mini app usa este endpoint para
+   * mostrar el estado real con próximo cobro, amount, etc.
+   */
+  @Get('user-status')
+  async userSubscriptionStatus(@Query('tg_id') tgIdRaw: string, @Req() req: any) {
+    const authorization = req.headers['authorization'] as string | undefined;
+    const expectedKey = `Bearer ${this.requireEnv('EXTERNAL_API_KEY')}`;
+    if (!this.timingSafeEqual(authorization ?? '', expectedKey)) {
+      throw new UnauthorizedException('Invalid API key');
+    }
+
+    const tgId = parseInt(tgIdRaw, 10);
+    if (isNaN(tgId) || tgId <= 0) {
+      throw new BadRequestException('tg_id must be a positive integer');
+    }
+
+    const result = await this.subscriptionService.getUserSubscriptionStatus(tgId);
+    return { ok: true, ...result };
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // CREAR SUSCRIPCIÓN (server-to-server)
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Inicia el flujo de nueva suscripción PayPal.
+   * POST /paypal/subscription/create
+   *
+   * Flujo:
+   * 1. Valida que el plan_id exista en nuestra DB (evita plan spoofing)
+   * 2. Verifica que el usuario no tenga ya una suscripción activa
+   * 3. Crea la suscripción en PayPal (status: APPROVAL_PENDING)
+   * 4. Pre-registra en DB para correlacionar el webhook entrante
+   * 5. Devuelve subscriptionId + approvalUrl para redirigir al usuario
+   */
+  @Post('subscription/create')
+  async createSubscription(@Body() body: CreateSubscriptionDto, @Req() req: any) {
+    const authorization = req.headers['authorization'] as string | undefined;
+    const expectedKey = `Bearer ${this.requireEnv('EXTERNAL_API_KEY')}`;
+    if (!this.timingSafeEqual(authorization ?? '', expectedKey)) {
+      throw new UnauthorizedException('Invalid API key');
+    }
+
+    // Validar que el plan existe en nuestra DB (anti-spoofing)
+    const plans = await this.subscriptionService.listActivePlans();
+    const planExists = plans.some((p) => p.plan_id === body.plan_id);
+    if (!planExists) {
+      throw new BadRequestException(`Plan ${body.plan_id} not found or inactive`);
+    }
+
+    // Verificar que no hay suscripción activa o pendiente (evita duplicados)
+    const currentStatus = await this.subscriptionService.getUserSubscriptionStatus(body.tg_id);
+    if (currentStatus.status === 'ACTIVE' || currentStatus.status === 'PENDING') {
+      throw new BadRequestException(
+        `User already has a ${currentStatus.status.toLowerCase()} subscription. Use /revise to change plan.`,
+      );
+    }
+
+    try {
+      const { subscriptionId, approvalUrl } = await this.paypalService.createSubscriptionLink(
+        body.plan_id,
+        body.return_url,
+        body.cancel_url,
+        String(body.tg_id),
+      );
+
+      // Pre-registrar en DB para que el webhook pueda correlacionarla
+      await this.subscriptionService.createSubscriptionIfNotExists({
+        paypal_subscription_id: subscriptionId,
+        plan_id: body.plan_id,
+        user_id: String(body.tg_id),
+        status: 'APPROVAL_PENDING',
+        features_applied: false,
+        activation_notified: false,
+      });
+
+      this.logger.log(
+        `Subscription created for user ${body.tg_id}: ${subscriptionId} (plan: ${body.plan_id})`,
+      );
+
+      return { ok: true, subscriptionId, approvalUrl };
+    } catch (error: any) {
+      console.error(error);
+      if (error instanceof BadRequestException || error instanceof UnauthorizedException) {
+        throw error;
+      }
+      this.logger.error(`Failed to create subscription for user ${body.tg_id}: ${error?.message}`);
+      throw new HttpException('Failed to create subscription', HttpStatus.BAD_GATEWAY);
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // REVISAR PLAN (upgrade / downgrade) — server-to-server
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Cambia el plan de una suscripción activa mediante la API de revisión de PayPal.
+   * POST /paypal/subscription/revise
+   *
+   * PayPal requiere que el suscriptor apruebe la revisión vía browser.
+   * Devuelve `approvalUrl` al que redirigir al usuario.
+   * Tras la aprobación, PayPal dispara el webhook BILLING.SUBSCRIPTION.UPDATED.
+   *
+   * Estrategia:
+   * - Upgrades y downgrades usan el mismo endpoint /revise de PayPal.
+   * - El ciclo de facturación y prorratas los maneja PayPal automáticamente.
+   */
+  @Post('subscription/revise')
+  async reviseSubscription(@Body() body: ReviseSubscriptionDto, @Req() req: any) {
+    const authorization = req.headers['authorization'] as string | undefined;
+    const expectedKey = `Bearer ${this.requireEnv('EXTERNAL_API_KEY')}`;
+    if (!this.timingSafeEqual(authorization ?? '', expectedKey)) {
+      throw new UnauthorizedException('Invalid API key');
+    }
+
+    // Validar ownership: la suscripción debe pertenecer al usuario
+    const subscription = await this.subscriptionService.getSubscriptionByPaypalId(
+      body.subscription_id,
+    );
+    if (!subscription) {
+      throw new BadRequestException('Subscription not found');
+    }
+    if (subscription.user_id !== String(body.tg_id)) {
+      this.logger.warn(
+        `Revise attempt by non-owner: tg_id=${body.tg_id}, owner=${subscription.user_id}`,
+      );
+      throw new UnauthorizedException('You do not own this subscription');
+    }
+
+    // Solo se puede revisar si está en estado válido
+    const revisableStatuses = ['ACTIVE', 'SUSPENDED'];
+    if (!revisableStatuses.includes(subscription.status)) {
+      throw new BadRequestException(
+        `Cannot revise a subscription in ${subscription.status} status`,
+      );
+    }
+
+    // Validar nuevo plan en DB
+    const plans = await this.subscriptionService.listActivePlans();
+    const newPlanExists = plans.some((p) => p.plan_id === body.new_plan_id);
+    if (!newPlanExists) {
+      throw new BadRequestException(`Plan ${body.new_plan_id} not found or inactive`);
+    }
+
+    // Evitar revisión innecesaria al mismo plan
+    if (subscription.plan_id === body.new_plan_id) {
+      throw new BadRequestException('Subscription is already on this plan');
+    }
+
+    try {
+      const { approvalUrl } = await this.paypalService.reviseSubscriptionPlan(
+        body.subscription_id,
+        body.new_plan_id,
+        body.return_url,
+        body.cancel_url,
+      );
+
+      this.logger.log(
+        `Subscription revise initiated: ${body.subscription_id} → plan ${body.new_plan_id} (user ${body.tg_id})`,
+      );
+
+      return {
+        ok: true,
+        approvalUrl: approvalUrl ?? null,
+        requiresApproval: approvalUrl !== null,
+      };
+    } catch (error: any) {
+      if (
+        error instanceof BadRequestException ||
+        error instanceof UnauthorizedException
+      ) {
+        throw error;
+      }
+      this.logger.error(`Failed to revise subscription ${body.subscription_id}: ${error?.message}`);
+      throw new HttpException('Failed to revise subscription', HttpStatus.BAD_GATEWAY);
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // REANUDAR SUSCRIPCIÓN SUSPENDIDA — server-to-server
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Reactiva una suscripción suspendida.
+   * POST /paypal/subscription/resume
+   *
+   * Solo funciona si la suscripción está en SUSPENDED.
+   * Llama a PayPal activate + actualiza DB.
+   */
+  @Post('subscription/resume')
+  async resumeSubscription(@Body() body: ResumeSubscriptionDto, @Req() req: any) {
+    const authorization = req.headers['authorization'] as string | undefined;
+    const expectedKey = `Bearer ${this.requireEnv('EXTERNAL_API_KEY')}`;
+    if (!this.timingSafeEqual(authorization ?? '', expectedKey)) {
+      throw new UnauthorizedException('Invalid API key');
+    }
+
+    const subscription = await this.subscriptionService.getSubscriptionByPaypalId(
+      body.subscription_id,
+    );
+    if (!subscription) {
+      throw new BadRequestException('Subscription not found');
+    }
+    if (subscription.user_id !== String(body.tg_id)) {
+      this.logger.warn(
+        `Resume attempt by non-owner: tg_id=${body.tg_id}, owner=${subscription.user_id}`,
+      );
+      throw new UnauthorizedException('You do not own this subscription');
+    }
+
+    if (subscription.status !== 'SUSPENDED') {
+      throw new BadRequestException(
+        `Cannot resume a subscription in ${subscription.status} status`,
+      );
+    }
+
+    try {
+      await this.paypalService.activateSubscription(body.subscription_id);
+      await this.subscriptionService.resumeSubscription(body.subscription_id);
+
+      this.logger.log(`Subscription resumed: ${body.subscription_id} (user ${body.tg_id})`);
+      return { ok: true, status: 'resumed' };
+    } catch (error: any) {
+      if (
+        error instanceof BadRequestException ||
+        error instanceof UnauthorizedException
+      ) {
+        throw error;
+      }
+      this.logger.error(`Failed to resume subscription ${body.subscription_id}: ${error?.message}`);
+      throw new HttpException('Failed to resume subscription', HttpStatus.BAD_GATEWAY);
     }
   }
 

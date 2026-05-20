@@ -214,7 +214,7 @@ export class PaypalWebhookProcessor extends WorkerHost {
         await this.subscriptionService.tryActivateFeatures(resource.id);
         break;
 
-      // ── Actualización: associate user via custom_id ─────────────────────────
+      // ── Actualización: associate user via custom_id + sincronizar plan ────────
       case 'BILLING.SUBSCRIPTION.UPDATED': {
         this.logger.log(`[${correlationId}] Subscription UPDATED: ${resource.id}`);
         const sub = await this.subscriptionService.getSubscriptionByPaypalId(resource.id);
@@ -230,6 +230,20 @@ export class PaypalWebhookProcessor extends WorkerHost {
             { user_id: { $exists: false } },
           );
           this.logger.log(`[${correlationId}] User ${customId} attached to ${resource.id}`);
+        }
+        // Sincronizar plan_id si cambió (resultado de una revisión upgrade/downgrade)
+        if (resource.plan_id && resource.plan_id !== sub.plan_id) {
+          this.logger.log(
+            `[${correlationId}] Plan changed on ${resource.id}: ${sub.plan_id} → ${resource.plan_id}`,
+          );
+          await this.subscriptionService.updateSubscription(
+            resource.id,
+            { plan_id: resource.plan_id, features_applied: false },
+          );
+          // Re-aplicar features del nuevo plan si la suscripción está activa
+          if (sub.status === 'ACTIVE') {
+            await this.subscriptionService.tryActivateFeatures(resource.id);
+          }
         }
         break;
       }

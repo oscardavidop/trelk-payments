@@ -54,6 +54,101 @@ export class SubscriptionService {
     return this.userModel.findOne({ id: telegramId }).lean() as unknown as User | null;
   }
 
+  // ════════════════════════════════════════════════
+  // PLANES DISPONIBLES
+  // ════════════════════════════════════════════════
+
+  /**
+   * Devuelve los planes activos (sin datos internos sensibles).
+   * Solo se exponen: name, plan_id, price y features públicas.
+   */
+  async listActivePlans(): Promise<Array<{
+    name: string;
+    plan_id: string;
+    price: number;
+    currency: string;
+    displayName: string;
+  }>> {
+    const plans = await this.planModel
+      .find({ active: true })
+      .select('name plan_id price')
+      .sort({ price: 1 })
+      .lean()
+      .exec();
+
+    return (plans as any[]).map((p) => ({
+      name: p.name,
+      plan_id: p.plan_id,
+      price: p.price ?? 0,
+      currency: 'USD',
+      displayName: (p.name as string).charAt(0).toUpperCase() + (p.name as string).slice(1),
+    }));
+  }
+
+  // ════════════════════════════════════════════════
+  // ESTADO DE SUSCRIPCIÓN DEL USUARIO
+  // ════════════════════════════════════════════════
+
+  /**
+   * Devuelve el estado completo de suscripción de un usuario:
+   * - suscripción activa/suspendida más reciente
+   * - próxima fecha de cobro
+   * - historial resumido (últimas 5 entradas)
+   */
+  async getUserSubscriptionStatus(telegramId: number): Promise<{
+    status: 'FREE' | 'ACTIVE' | 'SUSPENDED' | 'PAST_DUE' | 'CANCELLED' | 'EXPIRED' | 'PENDING';
+    subscription: any | null;
+    isPremium: boolean;
+  }> {
+    const userId = String(telegramId);
+
+    // Buscar suscripción más reciente no cancelada/expirada
+    const subscription = await this.subscriptionModel
+      .findOne({
+        user_id: userId,
+        status: { $nin: ['CANCELLED', 'EXPIRED'] },
+      })
+      .sort({ createdAt: -1 })
+      .lean()
+      .exec() as any;
+
+    if (!subscription) {
+      // Verificar si hubo suscripciones en el pasado
+      const hadSubscription = await this.subscriptionModel.exists({ user_id: userId });
+      return {
+        status: hadSubscription !== null ? 'CANCELLED' : 'FREE',
+        subscription: null,
+        isPremium: false,
+      };
+    }
+
+    const rawStatus = subscription.status as string;
+    const statusMap: Record<string, 'ACTIVE' | 'SUSPENDED' | 'PAST_DUE' | 'CANCELLED' | 'EXPIRED' | 'PENDING'> = {
+      ACTIVE: 'ACTIVE',
+      SUSPENDED: 'SUSPENDED',
+      APPROVAL_PENDING: 'PENDING',
+      PENDING_ASSOCIATION: 'PENDING',
+      CANCELLED: 'CANCELLED',
+      EXPIRED: 'EXPIRED',
+    };
+    const mappedStatus = statusMap[rawStatus] ?? 'PENDING';
+
+    return {
+      status: mappedStatus,
+      subscription: {
+        id: subscription.paypal_subscription_id,
+        plan_id: subscription.plan_id,
+        status: subscription.status,
+        next_billing_date: subscription.next_billing_date ?? null,
+        amount: subscription.amount ?? null,
+        currency: subscription.currency ?? 'USD',
+        start_time: subscription.start_time ?? null,
+        cancelled_at: (subscription as any).cancelledAt ?? null,
+      },
+      isPremium: mappedStatus === 'ACTIVE',
+    };
+  }
+
   /**
    * Obtiene una suscripción por ID de PayPal
    * FIX: Query correcto con paypal_subscription_id

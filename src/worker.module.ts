@@ -28,13 +28,19 @@ import { ReconciliationModule } from './reconciliation/reconciliation.module';
 @Module({
   imports: [
     // ── Bases de datos (conexiones independientes del API) ──────────────────
-    MongooseModule.forRoot(process.env.MONGODB_URI_PAYMENTS!, {
-      dbName: 'payments',
+    MongooseModule.forRootAsync({
       connectionName: 'payments',
+      useFactory: () => ({
+        uri: process.env.MONGODB_URI_PAYMENTS,
+        dbName: 'payments',
+      }),
     }),
-    MongooseModule.forRoot(process.env.MONGODB_URI_MBOTS!, {
-      dbName: 'mbot',
+    MongooseModule.forRootAsync({
       connectionName: 'mbot',
+      useFactory: () => ({
+        uri: process.env.MONGODB_URI_MBOTS,
+        dbName: 'mbot',
+      }),
     }),
 
     // ── Redis global (token cache + locks distribuidos) ────────────────────
