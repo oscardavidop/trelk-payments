@@ -378,7 +378,7 @@ export class PaypalService {
       const token = await this.getAccessToken();
 
       const body: Record<string, any> = {
-        plan_id: planId,
+        plan_id: planId.trim(),
         application_context: {
           brand_name: 'Trelk',
           locale: 'en-US',
