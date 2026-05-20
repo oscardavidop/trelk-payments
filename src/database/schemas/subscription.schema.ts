@@ -99,6 +99,18 @@ export class Subscription extends Document {
     @Prop({ type: Boolean, default: false })
     invalid_signature?: boolean;
 
+    // ── Deferred cancellation (cancel at period end) ──────────────────────
+    // true → user has requested cancellation, but access continues until next_billing_date.
+    // Cron job clears this flag and downgrades the user when next_billing_date <= now.
+    @Prop({ type: Boolean, default: false, index: true })
+    cancel_at_period_end?: boolean;
+
+    // ── Scheduled plan change (deferred downgrade) ────────────────────────
+    // Set when user downgrades to a lower plan. The current plan's features
+    // remain active until next_billing_date, then the new plan is applied.
+    @Prop()
+    scheduled_plan_id?: string;
+
     createdAt?: Date;
     updatedAt?: Date;
 }
@@ -132,4 +144,9 @@ SubscriptionSchema.index({ plan_id: 1 });
 SubscriptionSchema.index({ status: 1 });
 
 // Índice para detectar suscripciones próximas a vencer (cron de reconciliación)
+// Deferred cancellation: canceladas con acceso hasta fin de periodo
+SubscriptionSchema.index({ cancel_at_period_end: 1, next_billing_date: 1 });
+
+// Downgrades programados: plan cambia al próximo ciclo
+SubscriptionSchema.index({ scheduled_plan_id: 1, next_billing_date: 1 });
 SubscriptionSchema.index({ next_billing_date: 1, status: 1 });

@@ -4,7 +4,9 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Subscription } from '../database/schemas/subscription.schema';
 import { User } from '../database/schemas/user.schema';
+import { Plan } from '../database/schemas/plan.schema';
 import { PaypalService } from '../paypal/paypal.service';
+import { TelegramService } from '../telegram/telegram.service';
 
 /**
  * ReconciliationService
@@ -40,7 +42,10 @@ export class ReconciliationService {
     private readonly subscriptionModel: Model<Subscription>,
     @InjectModel(User.name, 'mbot')
     private readonly userModel: Model<User>,
+    @InjectModel(Plan.name, 'payments')
+    private readonly planModel: Model<Plan>,
     private readonly paypalService: PaypalService,
+    private readonly telegramService: TelegramService,
   ) {}
 
   // ── Cron 1: Suscripciones ACTIVE sin user_id (huérfanas) ─────────────────
@@ -185,6 +190,172 @@ export class ReconciliationService {
     this.logger.log(
       `[RECONCILIATION] Consistency check complete. Inconsistencies: ${inconsistencies}/${sample.length}`,
     );
+  }
+
+  // ── Cron 5: Aplicar cancelaciones diferidas expiradas ────────────────────
+  // cancel_at_period_end = true → el usuario canceló pero tiene acceso hasta
+  // next_billing_date. Al vencer el periodo, downgrade automático.
+  @Cron(CronExpression.EVERY_HOUR)
+  async applyExpiredDeferredCancellations(): Promise<void> {
+    const now = new Date();
+
+    const expired = await this.subscriptionModel
+      .find({
+        status: 'CANCELLED',
+        cancel_at_period_end: true,
+        next_billing_date: { $lte: now },
+      })
+      .lean();
+
+    if (expired.length === 0) return;
+
+    this.logger.log(
+      `[RECONCILIATION] Deferred cancellations to apply: ${expired.length}`,
+    );
+
+    for (const sub of expired) {
+      try {
+        // Atomically clear the flag to prevent double-processing
+        const result = await this.subscriptionModel.findOneAndUpdate(
+          {
+            _id: sub._id,
+            cancel_at_period_end: true, // guard against race conditions
+          },
+          { $set: { cancel_at_period_end: false } },
+          { new: false },
+        );
+        if (!result) continue; // Another worker got it first
+
+        // Downgrade user account
+        if (sub.user_id) {
+          await this.userModel.updateOne(
+            { id: Number(sub.user_id) },
+            {
+              $set: {
+                is_pro: false,
+                'pro_features.subscription.active': false,
+                'pro_features.subscription.auto_renew': false,
+              },
+            },
+          );
+
+          // Resolve plan name for notification
+          const plan = await this.planModel
+            .findOne({ plan_id: sub.plan_id })
+            .select('name')
+            .lean() as any;
+
+          await this.telegramService
+            .notifyAccessExpired(Number(sub.user_id), {
+              planName: plan?.name ?? 'premium',
+            })
+            .catch((err) =>
+              this.logger.error(
+                `[RECONCILIATION] Failed to notify access expired for user ${sub.user_id}: ${err.message}`,
+              ),
+            );
+        }
+
+        this.logger.log(
+          `[RECONCILIATION] Deferred cancellation applied: ${sub.paypal_subscription_id} (user: ${sub.user_id})`,
+        );
+      } catch (err: any) {
+        this.logger.error(
+          `[RECONCILIATION] Failed to apply deferred cancellation for ${sub.paypal_subscription_id}: ${err.message}`,
+        );
+      }
+    }
+  }
+
+  // ── Cron 6: Aplicar downgrades programados expirados ─────────────────────
+  // scheduled_plan_id → el usuario hizo downgrade via PayPal revise.
+  // Aplicado al siguiente ciclo de facturación.
+  @Cron(CronExpression.EVERY_HOUR)
+  async applyScheduledDowngrades(): Promise<void> {
+    const now = new Date();
+
+    const due = await this.subscriptionModel
+      .find({
+        status: 'ACTIVE',
+        scheduled_plan_id: { $exists: true, $ne: null },
+        next_billing_date: { $lte: now },
+      })
+      .lean();
+
+    if (due.length === 0) return;
+
+    this.logger.log(
+      `[RECONCILIATION] Scheduled downgrades to apply: ${due.length}`,
+    );
+
+    for (const sub of due) {
+      try {
+        const scheduledPlanId = (sub as any).scheduled_plan_id as string;
+
+        // Atomically grab and clear scheduled_plan_id
+        const result = await this.subscriptionModel.findOneAndUpdate(
+          {
+            _id: sub._id,
+            scheduled_plan_id: scheduledPlanId,
+          },
+          {
+            $unset: { scheduled_plan_id: '' },
+            $set: { plan_id: scheduledPlanId, features_applied: false },
+          },
+          { new: false },
+        );
+        if (!result) continue;
+
+        // Get new plan features
+        const newPlan = await this.planModel
+          .findOne({ plan_id: scheduledPlanId })
+          .lean() as any;
+
+        if (!newPlan || !sub.user_id) {
+          this.logger.warn(
+            `[RECONCILIATION] Skipping downgrade for ${sub.paypal_subscription_id}: plan or user not found`,
+          );
+          continue;
+        }
+
+        // Apply new (lower) plan features to user
+        const safeFeatures = JSON.parse(JSON.stringify(newPlan.features ?? {}));
+        await this.userModel.updateOne(
+          { id: Number(sub.user_id) },
+          {
+            $set: {
+              pro_features: {
+                ...safeFeatures,
+                subscription: {
+                  tier: newPlan.name,
+                  paypal_subscription_id: sub.paypal_subscription_id,
+                  started_at: sub.createdAt,
+                  expires_at: (sub as any).next_billing_date ?? null,
+                  auto_renew: true,
+                  interval: 30,
+                  active: true,
+                  price: newPlan.price,
+                },
+              },
+            },
+          },
+        );
+
+        // Mark features applied
+        await this.subscriptionModel.updateOne(
+          { _id: sub._id },
+          { $set: { features_applied: true } },
+        );
+
+        this.logger.log(
+          `[RECONCILIATION] Scheduled downgrade applied: ${sub.paypal_subscription_id} → plan ${scheduledPlanId} (user: ${sub.user_id})`,
+        );
+      } catch (err: any) {
+        this.logger.error(
+          `[RECONCILIATION] Failed to apply scheduled downgrade for ${sub.paypal_subscription_id}: ${err.message}`,
+        );
+      }
+    }
   }
 
   // ── Cron 4: Limpiar suscripciones APPROVAL_PENDING antiguas ──────────────

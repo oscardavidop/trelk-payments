@@ -102,18 +102,21 @@ export class SubscriptionService {
   }> {
     const userId = String(telegramId);
 
-    // Buscar suscripción más reciente no cancelada/expirada
+    // Include CANCELLED with cancel_at_period_end (still active) in the query
     const subscription = await this.subscriptionModel
       .findOne({
         user_id: userId,
-        status: { $nin: ['CANCELLED', 'EXPIRED'] },
+        $or: [
+          { status: { $nin: ['CANCELLED', 'EXPIRED'] } },
+          // Cancelled but period not yet ended → user still has access
+          { status: 'CANCELLED', cancel_at_period_end: true },
+        ],
       })
       .sort({ createdAt: -1 })
       .lean()
       .exec() as any;
 
     if (!subscription) {
-      // Verificar si hubo suscripciones en el pasado
       const hadSubscription = await this.subscriptionModel.exists({ user_id: userId });
       return {
         status: hadSubscription !== null ? 'CANCELLED' : 'FREE',
@@ -133,6 +136,15 @@ export class SubscriptionService {
     };
     const mappedStatus = statusMap[rawStatus] ?? 'PENDING';
 
+    // isPremium: true if ACTIVE, or if CANCELLED with deferred access still valid
+    const cancelledWithAccess =
+      rawStatus === 'CANCELLED' &&
+      subscription.cancel_at_period_end === true &&
+      subscription.next_billing_date &&
+      new Date(subscription.next_billing_date).getTime() > Date.now();
+
+    const isPremium = mappedStatus === 'ACTIVE' || cancelledWithAccess;
+
     return {
       status: mappedStatus,
       subscription: {
@@ -143,9 +155,12 @@ export class SubscriptionService {
         amount: subscription.amount ?? null,
         currency: subscription.currency ?? 'USD',
         start_time: subscription.start_time ?? null,
-        cancelled_at: (subscription as any).cancelledAt ?? null,
+        cancelled_at: subscription.cancelledAt ?? null,
+        // New fields for deferred cancel + scheduled downgrade
+        cancel_at_period_end: subscription.cancel_at_period_end ?? false,
+        scheduled_plan_id: subscription.scheduled_plan_id ?? null,
       },
-      isPremium: mappedStatus === 'ACTIVE',
+      isPremium,
     };
   }
 
@@ -158,10 +173,25 @@ export class SubscriptionService {
   }
 
   /**
-   * Cancela una suscripción
-   * FIX: Ahora actualiza correctamente el usuario y limpia pro_features
+   * Cancela una suscripción con lógica SaaS de cancelación diferida.
+   *
+   * CRITICAL UX RULE:
+   * The user keeps access until the end of the already-paid billing period.
+   * We do NOT revoke premium access immediately.
+   *
+   * Flow:
+   * 1. Mark status = 'CANCELLED' (reflects PayPal state)
+   * 2. Set cancel_at_period_end = true (if period hasn't ended yet)
+   * 3. Keep user.is_pro = true, keep pro_features intact
+   * 4. Send "Cancellation scheduled — access until X" notification
+   * 5. Cron job (ReconciliationService) downgrades user when next_billing_date <= now
+   *
+   * For immediate revocation (refund, fraud): pass { immediate: true }
    */
-  async cancelSubscription(subscriptionId: string): Promise<void> {
+  async cancelSubscription(
+    subscriptionId: string,
+    options: { immediate?: boolean } = {},
+  ): Promise<void> {
     const subscription = await this.subscriptionModel
       .findOne({ paypal_subscription_id: subscriptionId })
       .lean() as unknown as Subscription;
@@ -176,43 +206,126 @@ export class SubscriptionService {
       return;
     }
 
-    // Actualizar suscripción atómicamente
+    const periodEnd = (subscription as any).next_billing_date as Date | null;
+    const periodAlreadyEnded =
+      options.immediate ||
+      !periodEnd ||
+      new Date(periodEnd).getTime() <= Date.now();
+
+    // Mark cancelled in DB — reflect PayPal's state
     await this.subscriptionModel.updateOne(
       { paypal_subscription_id: subscriptionId },
       {
         $set: {
           status: 'CANCELLED',
           cancelledAt: new Date(),
-        }
+          // Deferred: keep access until period end
+          cancel_at_period_end: !periodAlreadyEnded,
+        },
       }
     );
 
-    // Limpiar features del usuario si existe
     if (subscription.user_id) {
-      const user = await this.userModel.findOne({ id: Number(subscription.user_id) });
-
-      if (user) {
-        user.is_pro = false;
-        user.pro_features = {};
-        await user.save();
-
-        this.logger.info(`User ${subscription.user_id} downgraded to free tier`);
-      }
-
-      // Notificar con contexto real: plan + fecha hasta cuándo tiene acceso
       const planName = (subscription as any).plan_name
         ?? (await this.planModel.findOne({ plan_id: subscription.plan_id }).lean() as any)?.name
         ?? 'premium';
 
-      await this.telegramService
-        .notifySubscriptionCancelled(Number(subscription.user_id), {
-          planName,
-          accessUntil: subscription.next_billing_date ?? null,
-        })
-        .catch((err) => this.logger.error('Failed to notify cancellation', err));
+      if (periodAlreadyEnded) {
+        // Period already over → downgrade immediately
+        this.logger.info(`Subscription period ended, downgrading immediately: ${subscriptionId}`);
+        await this.expireSubscriptionAccess(subscriptionId, planName);
+      } else {
+        // Access continues — notify with access-until date
+        await this.telegramService
+          .notifyCancelScheduled(Number(subscription.user_id), {
+            planName,
+            accessUntil: periodEnd,
+          })
+          .catch((err) => this.logger.error('Failed to notify cancel scheduled', err));
+      }
     }
 
-    this.logger.info(`Subscription cancelled: ${subscriptionId}`);
+    this.logger.info(
+      `Subscription cancelled (deferred=${!periodAlreadyEnded}): ${subscriptionId}, access until: ${periodEnd ?? 'immediate'}`,
+    );
+  }
+
+  /**
+   * Expirara el acceso premium de una suscripción.
+   * Llamado por: cron job (deferred cancel), BILLING.SUBSCRIPTION.EXPIRED webhook,
+   * o cancelación inmediata (refund/fraud).
+   *
+   * Downgrades the user account to free tier.
+   */
+  async expireSubscriptionAccess(subscriptionId: string, planNameHint?: string): Promise<void> {
+    const sub = await this.subscriptionModel
+      .findOneAndUpdate(
+        { paypal_subscription_id: subscriptionId },
+        { $set: { cancel_at_period_end: false } },
+        { new: false },
+      )
+      .lean() as unknown as Subscription;
+
+    if (!sub?.user_id) {
+      this.logger.info(`No user to downgrade for ${subscriptionId}`);
+      return;
+    }
+
+    const user = await this.userModel.findOne({ id: Number(sub.user_id) });
+    if (user) {
+      user.is_pro = false;
+      // Mark subscription sub-field as inactive (don't wipe pro_features entirely so
+      // history is preserved)
+      if ((user as any).pro_features?.subscription) {
+        (user as any).pro_features.subscription.active = false;
+        (user as any).pro_features.subscription.auto_renew = false;
+      }
+      await user.save();
+      this.logger.info(`User ${sub.user_id} downgraded to free tier (sub: ${subscriptionId})`);
+    }
+
+    // Resolve plan name for notification
+    const planName = planNameHint
+      ?? (await this.planModel.findOne({ plan_id: sub.plan_id }).lean() as any)?.name
+      ?? 'premium';
+
+    await this.telegramService
+      .notifyAccessExpired(Number(sub.user_id), { planName })
+      .catch((err) => this.logger.error('Failed to notify access expired', err));
+  }
+
+  /**
+   * Aplica un downgrade programado (scheduled_plan_id).
+   * Llamado por ReconciliationService cron cuando next_billing_date <= now.
+   */
+  async applyScheduledDowngrade(subscriptionId: string): Promise<void> {
+    // Atomically grab the scheduled plan and clear it
+    const sub = await this.subscriptionModel.findOneAndUpdate(
+      {
+        paypal_subscription_id: subscriptionId,
+        scheduled_plan_id: { $exists: true, $ne: null },
+      },
+      { $unset: { scheduled_plan_id: '' }, $set: { features_applied: false } },
+      { new: false },
+    ).lean() as unknown as Subscription;
+
+    if (!sub) return;
+
+    const newPlanId = (sub as any).scheduled_plan_id;
+    if (!newPlanId) return;
+
+    // Update plan_id to the confirmed downgrade plan
+    await this.subscriptionModel.updateOne(
+      { paypal_subscription_id: subscriptionId },
+      { $set: { plan_id: newPlanId } },
+    );
+
+    // Apply new (lower) plan features
+    await this.tryActivateFeatures(subscriptionId);
+
+    this.logger.info(
+      `Scheduled downgrade applied: ${subscriptionId} → plan ${newPlanId}`,
+    );
   }
 
   /**

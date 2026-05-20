@@ -236,22 +236,23 @@ export class PaypalWebhookProcessor extends WorkerHost {
           this.logger.log(
             `[${correlationId}] Plan changed on ${resource.id}: ${sub.plan_id} → ${resource.plan_id}`,
           );
-          await this.subscriptionService.updateSubscription(
-            resource.id,
-            { plan_id: resource.plan_id, features_applied: false },
-          );
-          // Re-aplicar features del nuevo plan si la suscripción está activa
-          if (sub.status === 'ACTIVE') {
-            await this.subscriptionService.tryActivateFeatures(resource.id);
-          }
-          // Notify plan change (upgrade or downgrade)
-          if (sub.user_id) {
-            const oldPlan = await this.subscriptionService.getPlanByPlanId(sub.plan_id);
-            const newPlan = await this.subscriptionService.getPlanByPlanId(resource.plan_id);
-            const TIERS: Record<string, number> = { free: 0, pro: 1, ultra: 2 };
-            const oldRank = TIERS[oldPlan?.name?.toLowerCase() ?? ''] ?? 0;
-            const newRank = TIERS[newPlan?.name?.toLowerCase() ?? ''] ?? 0;
-            if (newRank > oldRank) {
+
+          const oldPlan = await this.subscriptionService.getPlanByPlanId(sub.plan_id);
+          const newPlan = await this.subscriptionService.getPlanByPlanId(resource.plan_id);
+          const TIERS: Record<string, number> = { free: 0, pro: 1, ultra: 2 };
+          const oldRank = TIERS[oldPlan?.name?.toLowerCase() ?? ''] ?? 0;
+          const newRank = TIERS[newPlan?.name?.toLowerCase() ?? ''] ?? 0;
+
+          if (newRank >= oldRank) {
+            // ── UPGRADE: apply immediately
+            await this.subscriptionService.updateSubscription(
+              resource.id,
+              { plan_id: resource.plan_id, features_applied: false },
+            );
+            if (sub.status === 'ACTIVE') {
+              await this.subscriptionService.tryActivateFeatures(resource.id);
+            }
+            if (sub.user_id) {
               await this.telegramService
                 .notifyPlanUpgraded(Number(sub.user_id), {
                   fromPlan: oldPlan?.name ?? 'free',
@@ -262,17 +263,30 @@ export class PaypalWebhookProcessor extends WorkerHost {
                 .catch((err) =>
                   this.logger.error(`[${correlationId}] Upgrade notify failed: ${err.message}`),
                 );
-            } else {
+            }
+          } else {
+            // ── DOWNGRADE: schedule for end of current billing period
+            // Keep current plan features active until next_billing_date.
+            // ReconciliationService cron will apply the change when the period ends.
+            await this.subscriptionService.updateSubscription(
+              resource.id,
+              { scheduled_plan_id: resource.plan_id },
+              // IMPORTANT: do NOT change plan_id or reset features_applied here
+            );
+            if (sub.user_id) {
               await this.telegramService
-                .notifyPlanDowngraded(Number(sub.user_id), {
+                .notifyDowngradeScheduled(Number(sub.user_id), {
                   fromPlan: oldPlan?.name ?? 'premium',
                   toPlan: newPlan?.name ?? 'free',
                   effectiveDate: (sub as any).next_billing_date ?? null,
                 })
                 .catch((err) =>
-                  this.logger.error(`[${correlationId}] Downgrade notify failed: ${err.message}`),
+                  this.logger.error(`[${correlationId}] Downgrade-scheduled notify failed: ${err.message}`),
                 );
             }
+            this.logger.log(
+              `[${correlationId}] Downgrade scheduled on ${resource.id}: ${sub.plan_id} → ${resource.plan_id} (effective at period end)`,
+            );
           }
         }
         break;
@@ -302,9 +316,9 @@ export class PaypalWebhookProcessor extends WorkerHost {
       // ── Expiración ──────────────────────────────────────────────────────────
       case 'BILLING.SUBSCRIPTION.EXPIRED': {
         this.logger.log(`[${correlationId}] Subscription EXPIRED: ${resource.id}`);
-        await this.subscriptionService.updateStatus(resource.id, 'EXPIRED', resource);
-        // Fetch sub to get user_id and plan before clearing it
+        // Fetch before status update so we have plan + user info for notification
         const expiredSub = await this.subscriptionService.getSubscriptionByPaypalId(resource.id);
+        await this.subscriptionService.updateStatus(resource.id, 'EXPIRED', resource);
         if (expiredSub?.user_id) {
           const expiredPlan = await this.subscriptionService.getPlanByPlanId(expiredSub.plan_id);
           await this.telegramService
@@ -315,8 +329,8 @@ export class PaypalWebhookProcessor extends WorkerHost {
               this.logger.error(`[${correlationId}] Expired notify failed: ${err.message}`),
             );
         }
-        // cancelSubscription handles user downgrade
-        await this.subscriptionService.cancelSubscription(resource.id);
+        // Immediate downgrade (natural expiry, not deferred cancel)
+        await this.subscriptionService.expireSubscriptionAccess(resource.id);
         break;
       }
 
@@ -380,8 +394,9 @@ export class PaypalWebhookProcessor extends WorkerHost {
         this.logger.warn(`[${correlationId}] Refund DETECTED: ${resource.id}`);
         const billingId = resource?.billing_agreement_id;
         if (billingId) {
-          await this.subscriptionService.cancelSubscription(billingId);
-          this.logger.warn(`[${correlationId}] Subscription cancelled due to refund: ${billingId}`);
+          // Immediate revocation for refunds — user should not keep access
+          await this.subscriptionService.cancelSubscription(billingId, { immediate: true });
+          this.logger.warn(`[${correlationId}] Subscription immediately cancelled due to refund: ${billingId}`);
         }
         break;
       }

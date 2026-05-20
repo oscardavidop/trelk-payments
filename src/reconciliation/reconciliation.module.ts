@@ -3,7 +3,9 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { ReconciliationService } from './reconciliation.service';
 import { Subscription, SubscriptionSchema } from '../database/schemas/subscription.schema';
 import { User, UserSchema } from '../database/schemas/user.schema';
+import { Plan, PlanSchema } from '../database/schemas/plan.schema';
 import { PaypalModule } from '../paypal/paypal.module';
+import { TelegramModule } from '../telegram/telegram.module';
 
 /**
  * ReconciliationModule — WORKER-ONLY
@@ -14,7 +16,10 @@ import { PaypalModule } from '../paypal/paypal.module';
 @Module({
   imports: [
     MongooseModule.forFeature(
-      [{ name: Subscription.name, schema: SubscriptionSchema }],
+      [
+        { name: Subscription.name, schema: SubscriptionSchema },
+        { name: Plan.name, schema: PlanSchema },
+      ],
       'payments',
     ),
     MongooseModule.forFeature(
@@ -22,6 +27,7 @@ import { PaypalModule } from '../paypal/paypal.module';
       'mbot',
     ),
     PaypalModule,
+    TelegramModule,
   ],
   providers: [ReconciliationService],
 })

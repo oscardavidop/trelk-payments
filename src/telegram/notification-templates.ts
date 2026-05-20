@@ -301,3 +301,96 @@ export function tplPlanDowngraded(d: DowngradeData): string {
     `<b>Changed your mind?</b> You can upgrade again anytime from the mini app.`,
   ].join('\n');
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Cancel Scheduled — the single most important notification.
+ * The user cancelled, but access continues until period end.
+ * This is the critical difference from immediate cancellation.
+ */
+export interface CancelScheduledData {
+  planName: string;
+  accessUntil: Date | string | null;
+}
+
+export function tplCancelScheduled(d: CancelScheduledData): string {
+  const plan = planLabel(d.planName);
+  const until = d.accessUntil ? fmtDate(d.accessUntil) : 'the end of your billing period';
+
+  return [
+    `📋 <b>Cancellation scheduled</b>`,
+    '',
+    `Your <b>${plan}</b> subscription has been cancelled. We've noted your request.`,
+    '',
+    `📅 <b>Premium access continues until: ${until}</b>`,
+    '',
+    `✅ Everything stays active until then:`,
+    `  ▸ All premium features remain available`,
+    `  ▸ Your limits and speeds are unchanged`,
+    `  ▸ No further charges will be made`,
+    '',
+    `After ${until}, your account will automatically revert to the Free plan.`,
+    '',
+    `<b>Changed your mind?</b> You can resubscribe anytime from the mini app — your history is preserved.`,
+  ].join('\n');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Access expired — sent by the cron job when a deferred cancellation period ends.
+ * More personal than tplSubscriptionExpired (which is for natural expiry).
+ */
+export interface AccessExpiredData {
+  planName: string;
+}
+
+export function tplAccessExpired(d: AccessExpiredData): string {
+  const plan = planLabel(d.planName);
+
+  return [
+    `⏰ <b>Premium access ended</b>`,
+    '',
+    `Your <b>${plan}</b> billing period has ended and your account has been moved to the Free plan.`,
+    '',
+    `Thank you for being a premium member.`,
+    '',
+    `<b>Miss the features?</b> Resubscribe from the mini app — it only takes a few seconds.`,
+    '',
+    `Questions? Use <code>/support</code>.`,
+  ].join('\n');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Downgrade scheduled — sent when user downgrades via plan revision.
+ * Current plan features remain active until next billing date.
+ */
+export interface DowngradeScheduledData {
+  fromPlan: string;
+  toPlan: string;
+  effectiveDate: Date | string | null;
+}
+
+export function tplDowngradeScheduled(d: DowngradeScheduledData): string {
+  const from = planLabel(d.fromPlan);
+  const to = planLabel(d.toPlan);
+  const until = d.effectiveDate ? fmtDate(d.effectiveDate) : 'next billing cycle';
+
+  return [
+    `⬇️ <b>Downgrade scheduled</b>`,
+    '',
+    `Your plan will change from <b>${from}</b> to <b>${to}</b> at your next billing cycle.`,
+    '',
+    `📅 <b>Effective on:</b> ${until}`,
+    '',
+    `✅ Until then, everything stays the same:`,
+    `  ▸ All <b>${from}</b> features remain active`,
+    `  ▸ Your limits and speeds are unchanged`,
+    `  ▸ No immediate changes to your account`,
+    '',
+    `<b>Changed your mind?</b> You can upgrade back from the mini app at any time.`,
+  ].join('\n');
+}
