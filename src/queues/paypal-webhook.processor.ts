@@ -244,6 +244,36 @@ export class PaypalWebhookProcessor extends WorkerHost {
           if (sub.status === 'ACTIVE') {
             await this.subscriptionService.tryActivateFeatures(resource.id);
           }
+          // Notify plan change (upgrade or downgrade)
+          if (sub.user_id) {
+            const oldPlan = await this.subscriptionService.getPlanByPlanId(sub.plan_id);
+            const newPlan = await this.subscriptionService.getPlanByPlanId(resource.plan_id);
+            const TIERS: Record<string, number> = { free: 0, pro: 1, ultra: 2 };
+            const oldRank = TIERS[oldPlan?.name?.toLowerCase() ?? ''] ?? 0;
+            const newRank = TIERS[newPlan?.name?.toLowerCase() ?? ''] ?? 0;
+            if (newRank > oldRank) {
+              await this.telegramService
+                .notifyPlanUpgraded(Number(sub.user_id), {
+                  fromPlan: oldPlan?.name ?? 'free',
+                  toPlan: newPlan?.name ?? 'premium',
+                  amount: newPlan?.price ?? null,
+                  currency: 'USD',
+                })
+                .catch((err) =>
+                  this.logger.error(`[${correlationId}] Upgrade notify failed: ${err.message}`),
+                );
+            } else {
+              await this.telegramService
+                .notifyPlanDowngraded(Number(sub.user_id), {
+                  fromPlan: oldPlan?.name ?? 'premium',
+                  toPlan: newPlan?.name ?? 'free',
+                  effectiveDate: (sub as any).next_billing_date ?? null,
+                })
+                .catch((err) =>
+                  this.logger.error(`[${correlationId}] Downgrade notify failed: ${err.message}`),
+                );
+            }
+          }
         }
         break;
       }
@@ -251,37 +281,59 @@ export class PaypalWebhookProcessor extends WorkerHost {
       // ── Cancelación ─────────────────────────────────────────────────────────
       case 'BILLING.SUBSCRIPTION.CANCELLED':
         this.logger.log(`[${correlationId}] Subscription CANCELLED: ${resource.id}`);
+        // cancelSubscription sends the notification with full context internally
         await this.subscriptionService.cancelSubscription(resource.id);
         break;
 
-      // ── Suspensión ──────────────────────────────────────────────────────────
+      // ── Suspensión ──────────────────────────────────────────────────────────────────
       case 'BILLING.SUBSCRIPTION.SUSPENDED':
         this.logger.log(`[${correlationId}] Subscription SUSPENDED: ${resource.id}`);
+        // suspendSubscription sends the notification internally
         await this.subscriptionService.suspendSubscription(resource.id);
         break;
 
       // ── Reactivación ────────────────────────────────────────────────────────
       case 'BILLING.SUBSCRIPTION.RE_ACTIVATED':
         this.logger.log(`[${correlationId}] Subscription RE_ACTIVATED: ${resource.id}`);
+        // resumeSubscription sends the notification internally
         await this.subscriptionService.resumeSubscription(resource.id);
         break;
 
       // ── Expiración ──────────────────────────────────────────────────────────
-      case 'BILLING.SUBSCRIPTION.EXPIRED':
+      case 'BILLING.SUBSCRIPTION.EXPIRED': {
         this.logger.log(`[${correlationId}] Subscription EXPIRED: ${resource.id}`);
         await this.subscriptionService.updateStatus(resource.id, 'EXPIRED', resource);
+        // Fetch sub to get user_id and plan before clearing it
+        const expiredSub = await this.subscriptionService.getSubscriptionByPaypalId(resource.id);
+        if (expiredSub?.user_id) {
+          const expiredPlan = await this.subscriptionService.getPlanByPlanId(expiredSub.plan_id);
+          await this.telegramService
+            .notifySubscriptionExpired(Number(expiredSub.user_id), {
+              planName: expiredPlan?.name ?? 'premium',
+            })
+            .catch((err) =>
+              this.logger.error(`[${correlationId}] Expired notify failed: ${err.message}`),
+            );
+        }
+        // cancelSubscription handles user downgrade
         await this.subscriptionService.cancelSubscription(resource.id);
         break;
+      }
 
       // ── Fallo de pago ────────────────────────────────────────────────────────
       case 'BILLING.SUBSCRIPTION.PAYMENT.FAILED': {
         this.logger.warn(`[${correlationId}] Payment FAILED: ${resource.id}`);
         const failedSub = await this.subscriptionService.getSubscriptionByPaypalId(resource.id);
         if (failedSub?.user_id) {
+          const failedPlan = await this.subscriptionService.getPlanByPlanId(failedSub.plan_id);
           await this.telegramService
-            .notifyPaymentFailed(Number(failedSub.user_id))
+            .notifyPaymentFailed(Number(failedSub.user_id), {
+              planName: failedPlan?.name ?? 'premium',
+              amount: failedSub.amount ?? null,
+              currency: failedSub.currency ?? 'USD',
+            })
             .catch((err) =>
-              this.logger.error(`[${correlationId}] Telegram notify failed: ${err.message}`),
+              this.logger.error(`[${correlationId}] Payment-failed notify failed: ${err.message}`),
             );
         }
         break;
@@ -292,7 +344,7 @@ export class PaypalWebhookProcessor extends WorkerHost {
         this.logger.log(`[${correlationId}] Payment COMPLETED: ${resource.id}`);
         const billingId = resource?.billing_agreement_id;
         if (billingId) {
-          await this.subscriptionService.updateStatus(billingId, 'ACTIVE', {
+          const updatedSub = await this.subscriptionService.updateStatus(billingId, 'ACTIVE', {
             billing_info: {
               last_payment: {
                 amount: {
@@ -302,6 +354,23 @@ export class PaypalWebhookProcessor extends WorkerHost {
               },
             },
           });
+
+          // Notify renewal with real billing data
+          if (updatedSub?.user_id) {
+            const renewPlan = await this.subscriptionService.getPlanByPlanId(updatedSub.plan_id);
+            const paidAmount = parseFloat(resource?.amount?.total ?? '0');
+
+            await this.telegramService
+              .notifyPaymentRenewal(Number(updatedSub.user_id), {
+                planName: renewPlan?.name ?? 'premium',
+                amount: paidAmount || updatedSub.amount || 0,
+                currency: resource?.amount?.currency ?? updatedSub.currency ?? 'USD',
+                nextBillingDate: updatedSub.next_billing_date ?? null,
+              })
+              .catch((err) =>
+                this.logger.error(`[${correlationId}] Renewal notify failed: ${err.message}`),
+              );
+          }
         }
         break;
       }

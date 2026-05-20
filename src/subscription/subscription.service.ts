@@ -199,11 +199,17 @@ export class SubscriptionService {
         this.logger.info(`User ${subscription.user_id} downgraded to free tier`);
       }
 
-      // Notificar usuario
-      await this.telegramService.sendMessage(
-        Number(subscription.user_id),
-        '❌ Tu suscripción ha sido cancelada.'
-      ).catch(err => this.logger.error('Failed to notify user', err));
+      // Notificar con contexto real: plan + fecha hasta cuándo tiene acceso
+      const planName = (subscription as any).plan_name
+        ?? (await this.planModel.findOne({ plan_id: subscription.plan_id }).lean() as any)?.name
+        ?? 'premium';
+
+      await this.telegramService
+        .notifySubscriptionCancelled(Number(subscription.user_id), {
+          planName,
+          accessUntil: subscription.next_billing_date ?? null,
+        })
+        .catch((err) => this.logger.error('Failed to notify cancellation', err));
     }
 
     this.logger.info(`Subscription cancelled: ${subscriptionId}`);
@@ -232,10 +238,13 @@ export class SubscriptionService {
         { $set: { is_pro: false } }
       );
 
-      await this.telegramService.sendMessage(
-        Number(subscription.user_id),
-        '⏸️ Tu suscripción ha sido suspendida.'
-      ).catch(err => this.logger.error('Failed to notify user', err));
+      const planName = (subscription as any).plan_name
+        ?? (await this.planModel.findOne({ plan_id: subscription.plan_id }).lean() as any)?.name
+        ?? 'premium';
+
+      await this.telegramService
+        .notifySubscriptionSuspended(Number(subscription.user_id), { planName })
+        .catch((err) => this.logger.error('Failed to notify suspension', err));
     }
 
     this.logger.info(`Subscription suspended: ${subscriptionId}`);
@@ -272,10 +281,16 @@ export class SubscriptionService {
         { $set: { is_pro: true } }
       );
 
-      await this.telegramService.sendMessage(
-        Number(subscription.user_id),
-        '▶️ Tu suscripción ha sido reactivada.'
-      ).catch(err => this.logger.error('Failed to notify user', err));
+      const planName = (subscription as any).plan_name
+        ?? (await this.planModel.findOne({ plan_id: subscription.plan_id }).lean() as any)?.name
+        ?? 'premium';
+
+      await this.telegramService
+        .notifySubscriptionResumed(Number(subscription.user_id), {
+          planName,
+          nextBillingDate: (subscription as any).next_billing_date ?? null,
+        })
+        .catch((err) => this.logger.error('Failed to notify resume', err));
     }
 
     this.logger.info(`Subscription resumed: ${subscriptionId}`);
@@ -552,11 +567,15 @@ export class SubscriptionService {
 
       this.logger.info(`Features activated for user ${subscription.user_id}, plan: ${plan.name}`);
 
-      // Notificar usuario
-      await this.telegramService.sendMessage(
-        Number(subscription.user_id),
-        `✅ Tu suscripción a ${plan.name.toUpperCase()} ha sido activada. ¡Disfruta de las funciones premium!`
-      ).catch(err => this.logger.error('Failed to notify user', err));
+      // Premium welcome notification with full context
+      await this.telegramService
+        .notifySubscriptionActivated(Number(subscription.user_id), {
+          planName: plan.name,
+          amount: plan.price ?? null,
+          currency: 'USD',
+          nextBillingDate: subscription.next_billing_date ?? null,
+        })
+        .catch((err) => this.logger.error('Failed to notify activation', err));
 
     } catch (error) {
       this.logger.error(`Failed to activate features for ${subscriptionId}`, error);
@@ -725,5 +744,17 @@ export class SubscriptionService {
     }
 
     this.logger.info(`Subscription updated: ${subscriptionId}`);
+  }
+
+  /**
+   * Obtiene un plan por su plan_id de PayPal.
+   * Usado por el webhook processor para construir notificaciones contextuales.
+   */
+  async getPlanByPlanId(planId: string): Promise<{ name: string; price?: number } | null> {
+    if (!planId) return null;
+    return this.planModel
+      .findOne({ plan_id: planId })
+      .select('name price')
+      .lean() as unknown as { name: string; price?: number } | null;
   }
 }

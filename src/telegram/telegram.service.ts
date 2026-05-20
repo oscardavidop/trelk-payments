@@ -1,8 +1,36 @@
-import { Injectable } from '@nestjs/common';
-import axios from 'axios';
+import { Injectable, Logger } from '@nestjs/common';
+import axios, { AxiosError } from 'axios';
+import {
+  tplSubscriptionActivated,
+  tplPaymentRenewal,
+  tplSubscriptionCancelled,
+  tplSubscriptionSuspended,
+  tplSubscriptionResumed,
+  tplSubscriptionExpired,
+  tplPaymentFailed,
+  tplPlanUpgraded,
+  tplPlanDowngraded,
+  type ActivatedData,
+  type RenewalData,
+  type CancelledData,
+  type SuspendedData,
+  type ResumedData,
+  type ExpiredData,
+  type PaymentFailedData,
+  type UpgradeData,
+  type DowngradeData,
+} from './notification-templates';
+
+// Retry config: 3 attempts, exponential backoff 1s → 2s → 4s
+const MAX_RETRIES = 3;
+const RETRY_BASE_MS = 1_000;
+
+// Telegram errors that are permanent (no point retrying)
+const PERMANENT_ERROR_CODES = new Set([400, 403]);
 
 @Injectable()
 export class TelegramService {
+  private readonly logger = new Logger(TelegramService.name);
   private readonly botToken: string;
   private readonly apiUrl: string;
 
@@ -11,84 +39,100 @@ export class TelegramService {
     if (!token) {
       throw new Error('TELEGRAM_BOT_TOKEN is required');
     }
-
     this.botToken = token;
     this.apiUrl = `https://api.telegram.org/bot${this.botToken}`;
   }
 
-  /**
-   * Envía un mensaje a un usuario de Telegram
-   */
-  async sendMessage(chatId: number, text: string, parseMode: 'HTML' | 'Markdown' = 'HTML'): Promise<void> {
-    try {
-      await axios.post(`${this.apiUrl}/sendMessage`, {
-        chat_id: chatId,
-        text,
-        parse_mode: parseMode,
-      });
-
-      console.log(`📤 Message sent to ${chatId}`);
-    } catch (error: any) {
-      console.error(`❌ Error sending message to ${chatId}:`, error?.response?.data || error?.message);
-    }
-  }
+  // ── Core send with retry ───────────────────────────────────────────────────
 
   /**
-   * Envía un mensaje con botones inline
+   * Sends an HTML message with retry.
+   * Permanent errors (blocked user, invalid chat) are logged but not thrown.
    */
-  async sendMessageWithButtons(
+  async sendMessage(
     chatId: number,
     text: string,
-    buttons: Array<Array<{ text: string; url?: string; callback_data?: string }>>,
     parseMode: 'HTML' | 'Markdown' = 'HTML',
   ): Promise<void> {
-    try {
-      await axios.post(`${this.apiUrl}/sendMessage`, {
-        chat_id: chatId,
-        text,
-        parse_mode: parseMode,
-        reply_markup: {
-          inline_keyboard: buttons,
-        },
-      });
+    let lastError: Error | undefined;
 
-      console.log(`📤 Message with buttons sent to ${chatId}`);
-    } catch (error: any) {
-      console.error(`❌ Error sending message to ${chatId}:`, error?.response?.data || error?.message);
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        await axios.post(`${this.apiUrl}/sendMessage`, {
+          chat_id: chatId,
+          text,
+          parse_mode: parseMode,
+          disable_web_page_preview: true,
+        });
+        this.logger.log(`[TG] Sent to ${chatId} (attempt ${attempt})`);
+        return;
+      } catch (err: any) {
+        const axiosErr = err as AxiosError<any>;
+        const status = axiosErr.response?.status;
+
+        // Permanent error: user blocked bot or chat not found — don't retry
+        if (status && PERMANENT_ERROR_CODES.has(status)) {
+          this.logger.warn(
+            `[TG] Permanent error for chat ${chatId}: ${status} — ${axiosErr.response?.data?.description}`,
+          );
+          return;
+        }
+
+        lastError = err;
+        this.logger.warn(
+          `[TG] Attempt ${attempt}/${MAX_RETRIES} failed for chat ${chatId}: ${axiosErr.response?.data?.description ?? err.message}`,
+        );
+
+        if (attempt < MAX_RETRIES) {
+          await new Promise((r) => setTimeout(r, RETRY_BASE_MS * Math.pow(2, attempt - 1)));
+        }
+      }
     }
+
+    // Log final failure but don't throw — billing flow must not break on TG failure
+    this.logger.error(
+      `[TG] Failed to deliver message to ${chatId} after ${MAX_RETRIES} attempts: ${lastError?.message}`,
+    );
   }
 
-  /**
-   * Envía una notificación de suscripción activada
-   */
-  async notifySubscriptionActivated(chatId: number, planName: string): Promise<void> {
-    const text = `✅ <b>¡Suscripción Activada!</b>\n\n` +
-      `Plan: ${planName}\n` +
-      `Tu acceso premium está ahora activo.\n\n` +
-      `¡Gracias por tu compra!`;
+  // ── Lifecycle notification methods ─────────────────────────────────────────
 
+  async notifySubscriptionActivated(chatId: number, data: ActivatedData): Promise<void> {
+    await this.sendMessage(chatId, tplSubscriptionActivated(data));
+  }
+
+  async notifyPaymentRenewal(chatId: number, data: RenewalData): Promise<void> {
+    await this.sendMessage(chatId, tplPaymentRenewal(data));
+  }
+
+  async notifySubscriptionCancelled(chatId: number, data: CancelledData): Promise<void> {
+    await this.sendMessage(chatId, tplSubscriptionCancelled(data));
+  }
+
+  async notifySubscriptionSuspended(chatId: number, data: SuspendedData): Promise<void> {
+    await this.sendMessage(chatId, tplSubscriptionSuspended(data));
+  }
+
+  async notifySubscriptionResumed(chatId: number, data: ResumedData): Promise<void> {
+    await this.sendMessage(chatId, tplSubscriptionResumed(data));
+  }
+
+  async notifySubscriptionExpired(chatId: number, data: ExpiredData): Promise<void> {
+    await this.sendMessage(chatId, tplSubscriptionExpired(data));
+  }
+
+  async notifyPaymentFailed(chatId: number, data?: PaymentFailedData): Promise<void> {
+    const text = data
+      ? tplPaymentFailed(data)
+      : tplPaymentFailed({ planName: 'premium' });
     await this.sendMessage(chatId, text);
   }
 
-  /**
-   * Envía una notificación de pago fallido
-   */
-  async notifyPaymentFailed(chatId: number): Promise<void> {
-    const text = `❌ <b>Pago Fallido</b>\n\n` +
-      `No pudimos procesar tu pago.\n` +
-      `Por favor, intenta nuevamente o contacta a soporte.`;
-
-    await this.sendMessage(chatId, text);
+  async notifyPlanUpgraded(chatId: number, data: UpgradeData): Promise<void> {
+    await this.sendMessage(chatId, tplPlanUpgraded(data));
   }
 
-  /**
-   * Envía una notificación de suscripción cancelada
-   */
-  async notifySubscriptionCancelled(chatId: number): Promise<void> {
-    const text = `❌ <b>Suscripción Cancelada</b>\n\n` +
-      `Tu suscripción ha sido cancelada.\n` +
-      `Si fue un error, puedes reactivarla en cualquier momento.`;
-
-    await this.sendMessage(chatId, text);
+  async notifyPlanDowngraded(chatId: number, data: DowngradeData): Promise<void> {
+    await this.sendMessage(chatId, tplPlanDowngraded(data));
   }
 }
