@@ -20,6 +20,7 @@ import { CreateSubscriptionDto } from './dto/create-subscription.dto';
 import { ReviseSubscriptionDto } from './dto/revise-subscription.dto';
 import { ResumeSubscriptionDto } from './dto/resume-subscription.dto';
 import { AutoRenewSubscriptionDto } from './dto/auto-renew-subscription.dto';
+import { CancelDowngradeDto } from './dto/cancel-downgrade.dto';
 import { PaypalWebhookProducer } from '../queues/paypal-webhook.producer';
 import { RedisService } from '../redis/redis.service';
 import { WEBHOOK_DONE_PREFIX } from '../queues/paypal-webhook.types';
@@ -578,6 +579,49 @@ export class PaypalController {
       this.logger.error(`Failed to set auto-renew for ${body.subscription_id}: ${error?.message}`);
       throw new HttpException('Failed to update subscription renewal', HttpStatus.BAD_GATEWAY);
     }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // CANCELAR DOWNGRADE PROGRAMADO
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Cancela un downgrade programado (scheduled_plan_id).
+   * El usuario mantiene su plan actual en el próximo ciclo.
+   * POST /paypal/subscription/cancel-downgrade
+   *
+   * No requiere llamada a PayPal porque el downgrade aún no fue aprobado
+   * por PayPal (solo lo tenemos registrado localmente en scheduled_plan_id).
+   * Si PayPal ya procesó el plan change, el webhook BILLING.SUBSCRIPTION.UPDATED
+   * ya fue recibido — en ese caso el usuario debe hacer un nuevo revise al plan original.
+   */
+  @Post('subscription/cancel-downgrade')
+  async cancelDowngrade(@Body() body: CancelDowngradeDto, @Req() req: any) {
+    const authorization = req.headers['authorization'] as string | undefined;
+    const expectedKey = `Bearer ${this.requireEnv('EXTERNAL_API_KEY')}`;
+    if (!this.timingSafeEqual(authorization ?? '', expectedKey)) {
+      throw new UnauthorizedException('Invalid API key');
+    }
+
+    const subscription = await this.subscriptionService.getSubscriptionByPaypalId(
+      body.subscription_id,
+    );
+    if (!subscription) {
+      throw new BadRequestException('Subscription not found');
+    }
+    if (subscription.user_id !== String(body.tg_id)) {
+      throw new UnauthorizedException('You do not own this subscription');
+    }
+    if (!(subscription as any).scheduled_plan_id) {
+      throw new BadRequestException('No scheduled downgrade to cancel');
+    }
+
+    await this.subscriptionService.cancelScheduledDowngrade(body.subscription_id);
+
+    this.logger.log(
+      `Scheduled downgrade cancelled for ${body.subscription_id} (user ${body.tg_id})`,
+    );
+    return { ok: true, status: 'downgrade_cancelled' };
   }
 
   /**

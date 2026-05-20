@@ -410,6 +410,37 @@ export class SubscriptionService {
   }
 
   /**
+   * Cancela un downgrade programado (el usuario quiere mantener su plan actual).
+   * Borra scheduled_plan_id — el plan activo no cambia.
+   * Llama a PayPal revise de vuelta al plan actual para cancelar la revisión pendiente.
+   */
+  async cancelScheduledDowngrade(subscriptionId: string): Promise<void> {
+    const subscription = await this.subscriptionModel
+      .findOne({ paypal_subscription_id: subscriptionId })
+      .lean() as unknown as Subscription;
+
+    if (!subscription) {
+      this.logger.warn(`Subscription not found for cancel downgrade: ${subscriptionId}`);
+      return;
+    }
+
+    if (!(subscription as any).scheduled_plan_id) {
+      this.logger.info(`No scheduled downgrade to cancel: ${subscriptionId}`);
+      return;
+    }
+
+    // Clear the scheduled downgrade
+    await this.subscriptionModel.updateOne(
+      { paypal_subscription_id: subscriptionId },
+      { $unset: { scheduled_plan_id: '' } },
+    );
+
+    this.logger.info(
+      `Scheduled downgrade cancelled: ${subscriptionId} stays on ${subscription.plan_id}`,
+    );
+  }
+
+  /**
    * Crea una nueva suscripción
    */
   async createSubscription(data: any): Promise<Subscription> {
