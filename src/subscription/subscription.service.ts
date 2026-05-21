@@ -68,10 +68,11 @@ export class SubscriptionService {
     price: number;
     currency: string;
     displayName: string;
+    stars_price?: number;
   }>> {
     const plans = await this.planModel
       .find({ active: true })
-      .select('name plan_id price')
+      .select('name plan_id price stars_price')
       .sort({ price: 1 })
       .lean()
       .exec();
@@ -82,6 +83,7 @@ export class SubscriptionService {
       price: p.price ?? 0,
       currency: 'USD',
       displayName: (p.name as string).charAt(0).toUpperCase() + (p.name as string).slice(1),
+      stars_price: p.stars_price ?? undefined,
     }));
   }
 

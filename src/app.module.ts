@@ -7,6 +7,7 @@ import { APP_GUARD } from '@nestjs/core';
 import { PaypalModule } from './paypal/paypal.module';
 import { SubscriptionModule } from './subscription/subscription.module';
 import { TelegramModule } from './telegram/telegram.module';
+import { TelegramPaymentModule } from './telegram-payment/telegram-payment.module';
 import { AppController } from './app.controller';
 import { HealthController } from './common/health.controller';
 import { PayPalIpMiddleware } from './common/middleware/paypal-ip.middleware';
@@ -61,6 +62,7 @@ function parseBullMQConnection(redisUrl: string) {
     TelegramModule,
     PaypalModule,
     SubscriptionModule,
+    TelegramPaymentModule,
   ],
   controllers: [
     AppController,

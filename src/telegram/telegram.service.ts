@@ -163,4 +163,83 @@ export class TelegramService {
   async notifyDowngradeApplied(chatId: number, data: DowngradeAppliedData): Promise<void> {
     await this.sendMessage(chatId, tplDowngradeApplied(data));
   }
+
+  // ── Telegram Stars payment helpers ─────────────────────────────────────────
+
+  /**
+   * Creates a Telegram Stars invoice link via the Bot API.
+   *
+   * Stars payments:
+   * - Payment is instant (no pre_checkout_query)
+   * - The bot receives `successful_payment` update with telegram_payment_charge_id
+   * - One-time payment; access duration managed by our billing logic
+   *
+   * @param params.title        Short invoice title (max 32 chars)
+   * @param params.description  Invoice description (max 255 chars)
+   * @param params.payload      Custom payload sent back in successful_payment (max 128 bytes)
+   * @param params.starAmount   Number of Stars to charge
+   * @returns direct invoice link (t.me/...)
+   */
+  async createStarsInvoiceLink(params: {
+    title: string;
+    description: string;
+    payload: string;
+    starAmount: number;
+  }): Promise<string> {
+    const res = await axios.post<{ ok: boolean; result: string }>(
+      `${this.apiUrl}/createInvoiceLink`,
+      {
+        title: params.title.slice(0, 32),
+        description: params.description.slice(0, 255),
+        payload: params.payload.slice(0, 128),
+        currency: 'XTR',          // XTR = Telegram Stars currency code
+        prices: [{ label: params.title.slice(0, 32), amount: params.starAmount }],
+        // No provider_token needed for Stars payments
+      },
+    );
+
+    if (!res.data.ok || !res.data.result) {
+      throw new Error(`Telegram createInvoiceLink failed: ${JSON.stringify(res.data)}`);
+    }
+
+    return res.data.result; // direct invoice URL
+  }
+
+  /**
+   * Notify the user about a Stars payment receipt and subscription activation.
+   */
+  async notifyStarsPaymentReceived(chatId: number, data: {
+    planName: string;
+    starsAmount: number;
+    accessUntil: Date;
+  }): Promise<void> {
+    const untilStr = data.accessUntil.toLocaleDateString('en-US', {
+      month: 'short', day: 'numeric', year: 'numeric',
+    });
+    const text =
+      `⭐ <b>Payment received!</b>\n\n` +
+      `You paid <b>${data.starsAmount} Stars</b> for the <b>${data.planName}</b> plan.\n` +
+      `Access granted until <b>${untilStr}</b>.\n\n` +
+      `Renew anytime from the app before expiry to keep uninterrupted access.`;
+    await this.sendMessage(chatId, text);
+  }
+
+  /**
+   * Notify the user about an upcoming Stars subscription renewal reminder.
+   */
+  async notifyStarsRenewalReminder(chatId: number, data: {
+    planName: string;
+    starsAmount: number;
+    daysLeft: number;
+    accessUntil: Date;
+  }): Promise<void> {
+    const untilStr = data.accessUntil.toLocaleDateString('en-US', {
+      month: 'short', day: 'numeric', year: 'numeric',
+    });
+    const text =
+      `⭐ <b>Renewal reminder</b>\n\n` +
+      `Your <b>${data.planName}</b> plan expires in <b>${data.daysLeft} day${data.daysLeft !== 1 ? 's' : ''}</b> (${untilStr}).\n\n` +
+      `Open the app to renew for another month with <b>${data.starsAmount} Stars</b>.`;
+    await this.sendMessage(chatId, text);
+  }
 }

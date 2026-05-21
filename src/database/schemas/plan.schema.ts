@@ -148,6 +148,12 @@ export class Plan extends Document {
     @Prop({ default: true })
     active: boolean;
 
+    // ── Telegram Stars pricing ───────────────────────────────────────────
+    // Number of Telegram Stars required to purchase 30 days of this plan.
+    // Optional — if absent, Stars payment is not offered for this plan.
+    @Prop({ min: 1 })
+    stars_price?: number;
+
     createdAt?: Date;
     updatedAt?: Date;
 }

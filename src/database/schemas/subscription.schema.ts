@@ -111,6 +111,34 @@ export class Subscription extends Document {
     @Prop()
     scheduled_plan_id?: string;
 
+    // ── Payment provider ─────────────────────────────────────────────────
+    // Identifies which provider created this subscription.
+    // Defaults to 'paypal' for all existing records (backward compatible).
+    @Prop({
+        type: String,
+        enum: ['paypal', 'telegram_stars'],
+        default: 'paypal',
+        index: true,
+    })
+    provider?: 'paypal' | 'telegram_stars';
+
+    // ── Telegram Stars fields ────────────────────────────────────────────
+    // telegram_charge_id: Telegram's unique charge identifier.
+    // Used for idempotency and refund correlation.
+    @Prop({ sparse: true, index: true })
+    telegram_charge_id?: string;
+
+    // telegram_invoice_payload: Original payload sent when creating the invoice.
+    // Contains encoded { tgId, planName } for deduplication & audit.
+    @Prop()
+    telegram_invoice_payload?: string;
+
+    // ── Stars subscription expiry ────────────────────────────────────────
+    // Stars payments are one-time; we grant monthly access and manage renewal.
+    // expires_at: when the current Stars billing period ends.
+    @Prop({ index: true })
+    expires_at?: Date;
+
     createdAt?: Date;
     updatedAt?: Date;
 }
