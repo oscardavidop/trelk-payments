@@ -394,3 +394,43 @@ export function tplDowngradeScheduled(d: DowngradeScheduledData): string {
     `<b>Changed your mind?</b> You can upgrade back from the mini app at any time.`,
   ].join('\n');
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Downgrade applied — sent when the scheduled downgrade actually takes effect
+ * (new billing cycle started and the lower plan is now active).
+ */
+export interface DowngradeAppliedData {
+  fromPlan: string;
+  toPlan: string;
+  newAmount?: number | null;
+  currency?: string;
+  nextBillingDate?: Date | string | null;
+}
+
+export function tplDowngradeApplied(d: DowngradeAppliedData): string {
+  const from = planLabel(d.fromPlan);
+  const to = planLabel(d.toPlan);
+  const features = PLAN_FEATURES[d.toPlan.toLowerCase()] ?? [];
+  const featureLines = features.length > 0
+    ? features.map((f) => `  ▸ ${f}`).join('\n')
+    : `  ▸ Basic access`;
+  const billing = d.nextBillingDate
+    ? `\n🗓️  <b>Next billing:</b> ${fmtDate(d.nextBillingDate)}${d.newAmount ? ` — ${fmtAmount(d.newAmount, d.currency)}` : ''}`
+    : '';
+
+  return [
+    `⬇️ <b>Plan changed to ${to}</b>`,
+    '',
+    `Your new billing cycle has started and your plan is now <b>${to}</b>.`,
+    '',
+    `<b>Your current limits:</b>`,
+    featureLines,
+    billing,
+    '',
+    `Open the mini app to explore your plan details.`,
+    '',
+    `Want more? Upgrade anytime from the mini app.`,
+  ].join('\n');
+}

@@ -304,6 +304,21 @@ export class PaypalWebhookProcessor extends WorkerHost {
           );
           await this.subscriptionService.clearScheduledDowngrade(resource.id);
         }
+
+        // ── Always sync fresh billing data from PayPal resource ─────────────────
+        // next_billing_date and amount may have changed after any revision or renewal.
+        // Without this, the displayed next billing date goes stale after the first renewal.
+        const nextBillingTime = resource.billing_info?.next_billing_time as string | undefined;
+        const lastPaymentAmount = parseFloat(
+          resource.billing_info?.last_payment?.amount?.value ?? '0',
+        );
+        const lastPaymentCurrency = resource.billing_info?.last_payment?.amount?.currency_code as string | undefined;
+        await this.subscriptionService.syncBillingData(
+          resource.id,
+          lastPaymentAmount > 0 ? lastPaymentAmount : undefined,
+          lastPaymentCurrency,
+          nextBillingTime,
+        );
         break;
       }
 
@@ -384,8 +399,14 @@ export class PaypalWebhookProcessor extends WorkerHost {
             },
           });
 
-          // Notify renewal with real billing data
-          if (updatedSub?.user_id) {
+          // ── NEW: Apply scheduled downgrade if one is pending ───────────────────
+          // The new billing cycle just started — this is the correct moment to
+          // apply the downgrade the user requested (webhook-driven, deterministic).
+          // The reconciliation cron is a fallback safety net only.
+          const downgradeApplied = await this.subscriptionService.applyScheduledDowngradeOnRenewal(billingId);
+
+          // Notify renewal — skip if downgrade was applied (that notification is already sent)
+          if (!downgradeApplied && updatedSub?.user_id) {
             const renewPlan = await this.subscriptionService.getPlanByPlanId(updatedSub.plan_id);
             const paidAmount = parseFloat(resource?.amount?.total ?? '0');
 
@@ -398,6 +419,31 @@ export class PaypalWebhookProcessor extends WorkerHost {
               })
               .catch((err) =>
                 this.logger.error(`[${correlationId}] Renewal notify failed: ${err.message}`),
+              );
+          }
+        }
+        break;
+      }
+
+      // ── Renovación automática (equivalente a PAYMENT.SALE.COMPLETED para subs) ───
+      case 'BILLING.SUBSCRIPTION.RENEWED': {
+        this.logger.log(`[${correlationId}] Subscription RENEWED: ${resource.id}`);
+        // Same logic as PAYMENT.SALE.COMPLETED: apply scheduled downgrade if pending
+        const renewedDowngrade = await this.subscriptionService.applyScheduledDowngradeOnRenewal(resource.id);
+        if (!renewedDowngrade) {
+          // Standard renewal — update status and notify
+          const renewedSub = await this.subscriptionService.updateStatus(resource.id, 'ACTIVE', resource);
+          if (renewedSub?.user_id) {
+            const renewedPlan = await this.subscriptionService.getPlanByPlanId(renewedSub.plan_id);
+            await this.telegramService
+              .notifyPaymentRenewal(Number(renewedSub.user_id), {
+                planName: renewedPlan?.name ?? 'premium',
+                amount: renewedSub.amount ?? 0,
+                currency: renewedSub.currency ?? 'USD',
+                nextBillingDate: renewedSub.next_billing_date ?? null,
+              })
+              .catch((err) =>
+                this.logger.error(`[${correlationId}] RENEWED notify failed: ${err.message}`),
               );
           }
         }

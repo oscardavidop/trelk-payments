@@ -347,6 +347,25 @@ export class ReconciliationService {
           { $set: { features_applied: true } },
         );
 
+        // Notify user — downgrade has taken effect at the new billing cycle
+        const oldPlan = await this.planModel
+          .findOne({ plan_id: sub.plan_id })
+          .select('name')
+          .lean() as any;
+        await this.telegramService
+          .notifyDowngradeApplied(Number(sub.user_id), {
+            fromPlan: oldPlan?.name ?? 'premium',
+            toPlan: newPlan.name,
+            newAmount: newPlan.price ?? null,
+            currency: (sub as any).currency ?? 'USD',
+            nextBillingDate: (sub as any).next_billing_date ?? null,
+          })
+          .catch((err) =>
+            this.logger.error(
+              `[RECONCILIATION] Failed to notify downgrade applied for user ${sub.user_id}: ${err.message}`,
+            ),
+          );
+
         this.logger.log(
           `[RECONCILIATION] Scheduled downgrade applied: ${sub.paypal_subscription_id} → plan ${scheduledPlanId} (user: ${sub.user_id})`,
         );

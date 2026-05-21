@@ -13,6 +13,7 @@ import {
   tplCancelScheduled,
   tplAccessExpired,
   tplDowngradeScheduled,
+  tplDowngradeApplied,
   type ActivatedData,
   type RenewalData,
   type CancelledData,
@@ -25,6 +26,7 @@ import {
   type CancelScheduledData,
   type AccessExpiredData,
   type DowngradeScheduledData,
+  type DowngradeAppliedData,
 } from './notification-templates';
 
 // Retry config: 3 attempts, exponential backoff 1s → 2s → 4s
@@ -155,5 +157,10 @@ export class TelegramService {
   /** Downgrade scheduled — plan change applied at next billing cycle */
   async notifyDowngradeScheduled(chatId: number, data: DowngradeScheduledData): Promise<void> {
     await this.sendMessage(chatId, tplDowngradeScheduled(data));
+  }
+
+  /** Downgrade applied — the scheduled downgrade took effect at the new billing cycle */
+  async notifyDowngradeApplied(chatId: number, data: DowngradeAppliedData): Promise<void> {
+    await this.sendMessage(chatId, tplDowngradeApplied(data));
   }
 }

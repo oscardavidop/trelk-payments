@@ -102,19 +102,29 @@ export class SubscriptionService {
   }> {
     const userId = String(telegramId);
 
-    // Include CANCELLED with cancel_at_period_end (still active) in the query
-    const subscription = await this.subscriptionModel
-      .findOne({
-        user_id: userId,
-        $or: [
-          { status: { $nin: ['CANCELLED', 'EXPIRED'] } },
-          // Cancelled but period not yet ended → user still has access
-          { status: 'CANCELLED', cancel_at_period_end: true },
-        ],
-      })
-      .sort({ createdAt: -1 })
+    // Priority 1: ACTIVE or SUSPENDED — these are the canonical "current" subscriptions.
+    // Sort ACTIVE before SUSPENDED (alphabetical order happens to work: A < S).
+    // This prevents APPROVAL_PENDING from shadowing an existing ACTIVE sub.
+    let subscription = await this.subscriptionModel
+      .findOne({ user_id: userId, status: { $in: ['ACTIVE', 'SUSPENDED'] } })
+      .sort({ status: 1, createdAt: -1 })
       .lean()
       .exec() as any;
+
+    // Priority 2: Cancelled-with-deferred-access or pending approval
+    if (!subscription) {
+      subscription = await this.subscriptionModel
+        .findOne({
+          user_id: userId,
+          $or: [
+            { status: 'CANCELLED', cancel_at_period_end: true },
+            { status: { $in: ['APPROVAL_PENDING', 'PENDING_ASSOCIATION'] } },
+          ],
+        })
+        .sort({ createdAt: -1 })
+        .lean()
+        .exec() as any;
+    }
 
     if (!subscription) {
       const hadSubscription = await this.subscriptionModel.exists({ user_id: userId });
@@ -490,6 +500,96 @@ export class SubscriptionService {
       { $unset: { scheduled_plan_id: '' } },
     );
     this.logger.info(`Scheduled downgrade cleared (revert confirmed by PayPal): ${subscriptionId}`);
+  }
+
+  /**
+   * Syncs billing data (amount, currency, next_billing_date) from a webhook resource.
+   * Called from BILLING.SUBSCRIPTION.UPDATED and BILLING.SUBSCRIPTION.RENEWED handlers.
+   * Safe to call multiple times (idempotent).
+   */
+  async syncBillingData(
+    subscriptionId: string,
+    amount?: number,
+    currency?: string,
+    nextBillingDate?: string | null,
+  ): Promise<void> {
+    const update: Record<string, any> = {};
+    if (amount != null && amount > 0) {
+      update.amount = amount;
+      update.currency = currency ?? 'USD';
+    }
+    if (nextBillingDate) {
+      update.next_billing_date = new Date(nextBillingDate);
+    }
+    if (Object.keys(update).length === 0) return;
+
+    await this.subscriptionModel.updateOne(
+      { paypal_subscription_id: subscriptionId },
+      { $set: update },
+    );
+    this.logger.info(
+      `Billing data synced for ${subscriptionId}: amount=${amount}, nextBillingDate=${nextBillingDate}`,
+    );
+  }
+
+  /**
+   * Applies a scheduled downgrade on a new billing cycle (webhook-driven).
+   * Called from PAYMENT.SALE.COMPLETED and BILLING.SUBSCRIPTION.RENEWED handlers.
+   *
+   * Returns true if a downgrade was applied, false if none was pending.
+   * The operation is ATOMIC: uses findOneAndUpdate to prevent double-application.
+   */
+  async applyScheduledDowngradeOnRenewal(subscriptionId: string): Promise<boolean> {
+    // Atomically grab the scheduled plan and clear it in one operation
+    const sub = await this.subscriptionModel.findOneAndUpdate(
+      {
+        paypal_subscription_id: subscriptionId,
+        scheduled_plan_id: { $exists: true, $ne: null },
+      },
+      { $unset: { scheduled_plan_id: '' }, $set: { features_applied: false } },
+      { new: false },
+    ).lean() as unknown as Subscription;
+
+    if (!sub) return false; // No scheduled downgrade pending
+
+    const newPlanId = (sub as any).scheduled_plan_id;
+    if (!newPlanId) return false;
+
+    // Update plan_id to the new (lower) plan
+    await this.subscriptionModel.updateOne(
+      { paypal_subscription_id: subscriptionId },
+      { $set: { plan_id: newPlanId } },
+    );
+
+    // Apply new plan's features to the user
+    await this.tryActivateFeatures(subscriptionId);
+
+    // Notify user: downgrade has taken effect
+    if (sub.user_id) {
+      const oldPlan = await this.planModel
+        .findOne({ plan_id: sub.plan_id })
+        .select('name price')
+        .lean() as any;
+      const newPlan = await this.planModel
+        .findOne({ plan_id: newPlanId })
+        .select('name price')
+        .lean() as any;
+
+      await this.telegramService
+        .notifyDowngradeApplied(Number(sub.user_id), {
+          fromPlan: oldPlan?.name ?? 'premium',
+          toPlan: newPlan?.name ?? 'free',
+          newAmount: newPlan?.price ?? null,
+          currency: sub.currency ?? 'USD',
+          nextBillingDate: (sub as any).next_billing_date ?? null,
+        })
+        .catch((err) =>
+          this.logger.error(`Failed to notify downgrade applied for ${subscriptionId}: ${err.message}`),
+        );
+    }
+
+    this.logger.info(`Scheduled downgrade applied on renewal: ${subscriptionId} → plan ${newPlanId}`);
+    return true;
   }
 
   /**
