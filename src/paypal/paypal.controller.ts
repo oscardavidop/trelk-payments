@@ -401,6 +401,15 @@ export class PaypalController {
       throw new UnauthorizedException('You do not own this subscription');
     }
 
+    // Guard: cannot revise if cancellation is already scheduled (cancel_at_period_end).
+    // The subscription will not renew — revising it would create an impossible billing state.
+    // The user should resubscribe instead.
+    if ((subscription as any).cancel_at_period_end === true) {
+      throw new BadRequestException(
+        'Cannot change plan while a cancellation is pending. Resubscribe to start a new subscription.',
+      );
+    }
+
     // Solo se puede revisar si está en estado válido
     const revisableStatuses = ['ACTIVE', 'SUSPENDED'];
     if (!revisableStatuses.includes(subscription.status)) {
@@ -590,10 +599,9 @@ export class PaypalController {
    * El usuario mantiene su plan actual en el próximo ciclo.
    * POST /paypal/subscription/cancel-downgrade
    *
-   * No requiere llamada a PayPal porque el downgrade aún no fue aprobado
-   * por PayPal (solo lo tenemos registrado localmente en scheduled_plan_id).
-   * Si PayPal ya procesó el plan change, el webhook BILLING.SUBSCRIPTION.UPDATED
-   * ya fue recibido — en ese caso el usuario debe hacer un nuevo revise al plan original.
+   * CRITICAL: This endpoint calls PayPal /revise back to the original plan.
+   * Without this, PayPal would still charge the lower amount at the next billing cycle.
+   * If PayPal requires user approval, returns an approvalUrl.
    */
   @Post('subscription/cancel-downgrade')
   async cancelDowngrade(@Body() body: CancelDowngradeDto, @Req() req: any) {
@@ -616,12 +624,27 @@ export class PaypalController {
       throw new BadRequestException('No scheduled downgrade to cancel');
     }
 
-    await this.subscriptionService.cancelScheduledDowngrade(body.subscription_id);
+    try {
+      const { approvalUrl } = await this.subscriptionService.cancelScheduledDowngrade(
+        body.subscription_id,
+        body.return_url,
+        body.cancel_url,
+      );
 
-    this.logger.log(
-      `Scheduled downgrade cancelled for ${body.subscription_id} (user ${body.tg_id})`,
-    );
-    return { ok: true, status: 'downgrade_cancelled' };
+      this.logger.log(
+        `Downgrade cancel initiated for ${body.subscription_id} (user ${body.tg_id}), requiresApproval=${!!approvalUrl}`,
+      );
+      return {
+        ok: true,
+        approvalUrl: approvalUrl ?? null,
+        requiresApproval: !!approvalUrl,
+        status: approvalUrl ? 'approval_required' : 'downgrade_cancelled',
+      };
+    } catch (error: any) {
+      if (error instanceof BadRequestException || error instanceof UnauthorizedException) throw error;
+      this.logger.error(`Failed to cancel downgrade for ${body.subscription_id}: ${error?.message}`);
+      throw new HttpException('Failed to cancel scheduled downgrade', HttpStatus.BAD_GATEWAY);
+    }
   }
 
   /**

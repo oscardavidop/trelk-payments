@@ -249,6 +249,10 @@ export class PaypalWebhookProcessor extends WorkerHost {
               resource.id,
               { plan_id: resource.plan_id, features_applied: false },
             );
+            // Clear any pending downgrade — this upgrade supersedes it
+            if ((sub as any).scheduled_plan_id) {
+              await this.subscriptionService.clearScheduledDowngrade(resource.id);
+            }
             if (sub.status === 'ACTIVE') {
               await this.subscriptionService.tryActivateFeatures(resource.id);
             }
@@ -288,6 +292,17 @@ export class PaypalWebhookProcessor extends WorkerHost {
               `[${correlationId}] Downgrade scheduled on ${resource.id}: ${sub.plan_id} → ${resource.plan_id} (effective at period end)`,
             );
           }
+        } else if (
+          resource.plan_id &&
+          resource.plan_id === sub.plan_id &&
+          (sub as any).scheduled_plan_id
+        ) {
+          // ── UNDO DOWNGRADE confirmed by PayPal: plan stayed the same but pending
+          // downgrade was cancelled. Clear scheduled_plan_id from DB.
+          this.logger.log(
+            `[${correlationId}] Downgrade revert confirmed on ${resource.id}: stays on ${sub.plan_id}`,
+          );
+          await this.subscriptionService.clearScheduledDowngrade(resource.id);
         }
         break;
       }

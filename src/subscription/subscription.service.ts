@@ -159,6 +159,9 @@ export class SubscriptionService {
         // New fields for deferred cancel + scheduled downgrade
         cancel_at_period_end: subscription.cancel_at_period_end ?? false,
         scheduled_plan_id: subscription.scheduled_plan_id ?? null,
+        // Billing preview: what will actually be charged at next renewal.
+        // Differs from `amount` when a downgrade is scheduled.
+        billing_preview: await this.resolveBillingPreview(subscription),
       },
       isPremium,
     };
@@ -410,34 +413,124 @@ export class SubscriptionService {
   }
 
   /**
-   * Cancela un downgrade programado (el usuario quiere mantener su plan actual).
-   * Borra scheduled_plan_id — el plan activo no cambia.
-   * Llama a PayPal revise de vuelta al plan actual para cancelar la revisión pendiente.
+   * Cancela un downgrade programado sincronizando con PayPal.
+   *
+   * CRITICAL FIX: Without calling PayPal /revise back to the current plan,
+   * PayPal would still apply the lower plan at the next billing cycle,
+   * causing a revenue loss and a DB ≠ PayPal inconsistency.
+   *
+   * Flow:
+   * 1. Verify scheduled_plan_id exists
+   * 2. Call PayPal /revise with the CURRENT (higher) plan to cancel the pending revision
+   * 3. If PayPal confirms immediately → clear scheduled_plan_id from DB now
+   * 4. If PayPal requires user approval → return approvalUrl; webhook will clear DB on confirm
    */
-  async cancelScheduledDowngrade(subscriptionId: string): Promise<void> {
+  async cancelScheduledDowngrade(
+    subscriptionId: string,
+    returnUrl: string,
+    cancelUrl: string,
+  ): Promise<{ approvalUrl: string | null }> {
     const subscription = await this.subscriptionModel
       .findOne({ paypal_subscription_id: subscriptionId })
       .lean() as unknown as Subscription;
 
     if (!subscription) {
       this.logger.warn(`Subscription not found for cancel downgrade: ${subscriptionId}`);
-      return;
+      return { approvalUrl: null };
     }
 
-    if (!(subscription as any).scheduled_plan_id) {
+    const scheduledPlanId = (subscription as any).scheduled_plan_id;
+    if (!scheduledPlanId) {
       this.logger.info(`No scheduled downgrade to cancel: ${subscriptionId}`);
-      return;
+      return { approvalUrl: null };
     }
 
-    // Clear the scheduled downgrade
+    // Revise PayPal back to the current (higher) plan.
+    // This replaces the pending downgrade revision in PayPal's system.
+    try {
+      const { approvalUrl } = await this.paypalService.reviseSubscriptionPlan(
+        subscriptionId,
+        subscription.plan_id, // revert to current plan
+        returnUrl,
+        cancelUrl,
+      );
+
+      if (!approvalUrl) {
+        // PayPal confirmed immediately (rare) — safe to clear DB now
+        await this.subscriptionModel.updateOne(
+          { paypal_subscription_id: subscriptionId },
+          { $unset: { scheduled_plan_id: '' } },
+        );
+        this.logger.info(
+          `Downgrade cancelled immediately (no approval needed): ${subscriptionId} stays on ${subscription.plan_id}`,
+        );
+      } else {
+        // Approval required — webhook BILLING.SUBSCRIPTION.UPDATED will confirm + clear DB
+        this.logger.info(
+          `Downgrade cancel initiated: ${subscriptionId} awaiting PayPal approval (plan=${subscription.plan_id})`,
+        );
+      }
+
+      return { approvalUrl };
+    } catch (err: any) {
+      this.logger.error(
+        `PayPal revise failed during downgrade cancel for ${subscriptionId}: ${err?.message}`,
+      );
+      throw err;
+    }
+  }
+
+  /**
+   * Clears scheduled_plan_id from a subscription.
+   * Called by webhook processor when PayPal confirms a revert to original plan.
+   */
+  async clearScheduledDowngrade(subscriptionId: string): Promise<void> {
     await this.subscriptionModel.updateOne(
       { paypal_subscription_id: subscriptionId },
       { $unset: { scheduled_plan_id: '' } },
     );
+    this.logger.info(`Scheduled downgrade cleared (revert confirmed by PayPal): ${subscriptionId}`);
+  }
 
-    this.logger.info(
-      `Scheduled downgrade cancelled: ${subscriptionId} stays on ${subscription.plan_id}`,
-    );
+  /**
+   * Resolves what will actually be charged at the next billing date.
+   * Returns the scheduled (lower) plan's price when a downgrade is pending,
+   * or the current subscription amount otherwise.
+   */
+  private async resolveBillingPreview(subscription: any): Promise<{
+    plan_id: string;
+    amount: number;
+    currency: string;
+    date: string | null;
+  } | null> {
+    if (!subscription) return null;
+
+    const scheduledPlanId = subscription.scheduled_plan_id;
+    const date = subscription.next_billing_date
+      ? new Date(subscription.next_billing_date).toISOString()
+      : null;
+
+    if (scheduledPlanId) {
+      // Downgrade scheduled — look up the future plan's price
+      const futurePlan = await this.planModel
+        .findOne({ plan_id: scheduledPlanId })
+        .select('price')
+        .lean() as any;
+      return {
+        plan_id: scheduledPlanId,
+        amount: futurePlan?.price ?? 0,
+        currency: subscription.currency ?? 'USD',
+        date,
+      };
+    }
+
+    // No change scheduled — next charge = current amount
+    return {
+      plan_id: subscription.plan_id,
+      amount: subscription.amount ?? 0,
+      currency: subscription.currency ?? 'USD',
+      date,
+    };
   }
 
   /**

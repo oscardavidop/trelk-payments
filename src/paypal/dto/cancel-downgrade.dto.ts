@@ -1,4 +1,4 @@
-import { IsInt, IsString, IsNotEmpty, Min, Matches } from 'class-validator';
+import { IsInt, IsString, IsNotEmpty, IsUrl, Min, Matches } from 'class-validator';
 import { Transform } from 'class-transformer';
 
 export class CancelDowngradeDto {
@@ -14,4 +14,12 @@ export class CancelDowngradeDto {
     message: 'subscription_id must be a valid PayPal subscription ID (I-...)',
   })
   subscription_id: string;
+
+  /** Return URL after user approves the revision in PayPal */
+  @IsUrl({ require_tld: false }, { message: 'return_url must be a valid URL' })
+  return_url: string;
+
+  /** Cancel URL if user abandons the PayPal approval flow */
+  @IsUrl({ require_tld: false }, { message: 'cancel_url must be a valid URL' })
+  cancel_url: string;
 }
