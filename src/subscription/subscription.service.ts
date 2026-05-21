@@ -77,14 +77,25 @@ export class SubscriptionService {
       .lean()
       .exec();
 
-    return (plans as any[]).map((p) => ({
-      name: p.name,
-      plan_id: p.plan_id,
-      price: p.price ?? 0,
-      currency: 'USD',
-      displayName: (p.name as string).charAt(0).toUpperCase() + (p.name as string).slice(1),
-      stars_price: p.stars_price ?? undefined,
-    }));
+    // Stars per USD conversion rate — env-configurable, default 75 Stars/USD
+    const starsPerUsd = Number(process.env.STARS_PER_USD ?? 75);
+
+    return (plans as any[]).map((p) => {
+      // Prefer explicit stars_price from DB; fallback to formula-derived value
+      let starsPrice: number | undefined = p.stars_price ?? undefined;
+      if (!starsPrice && p.price > 0) {
+        // Formula: ceiling to nearest 50 Stars
+        starsPrice = Math.ceil((p.price * starsPerUsd) / 50) * 50;
+      }
+      return {
+        name: p.name,
+        plan_id: p.plan_id,
+        price: p.price ?? 0,
+        currency: 'USD',
+        displayName: (p.name as string).charAt(0).toUpperCase() + (p.name as string).slice(1),
+        stars_price: starsPrice,
+      };
+    });
   }
 
   // ════════════════════════════════════════════════

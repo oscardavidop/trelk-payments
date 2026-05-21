@@ -173,6 +173,8 @@ export class TelegramService {
    * - Payment is instant (no pre_checkout_query)
    * - The bot receives `successful_payment` update with telegram_payment_charge_id
    * - One-time payment; access duration managed by our billing logic
+   * - Telegram Stars DO require pre_checkout_query → answerPreCheckoutQuery
+   *   The bot handles pre_checkout_query (fast-path approve within 10s)
    *
    * @param params.title        Short invoice title (max 32 chars)
    * @param params.description  Invoice description (max 255 chars)
