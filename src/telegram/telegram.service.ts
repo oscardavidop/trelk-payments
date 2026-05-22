@@ -187,17 +187,25 @@ export class TelegramService {
     description: string;
     payload: string;
     starAmount: number;
+    /** Pass 2592000 to create a recurring 30-day subscription invoice */
+    subscriptionPeriod?: 2592000;
   }): Promise<string> {
+    const body: Record<string, unknown> = {
+      title: params.title.slice(0, 32),
+      description: params.description.slice(0, 255),
+      payload: params.payload.slice(0, 128),
+      provider_token: '',           // Must be empty string for Telegram Stars
+      currency: 'XTR',             // XTR = Telegram Stars currency code
+      prices: [{ label: params.title.slice(0, 32), amount: params.starAmount }],
+    };
+
+    if (params.subscriptionPeriod) {
+      body.subscription_period = params.subscriptionPeriod;
+    }
+
     const res = await axios.post<{ ok: boolean; result: string }>(
       `${this.apiUrl}/createInvoiceLink`,
-      {
-        title: params.title.slice(0, 32),
-        description: params.description.slice(0, 255),
-        payload: params.payload.slice(0, 128),
-        currency: 'XTR',          // XTR = Telegram Stars currency code
-        prices: [{ label: params.title.slice(0, 32), amount: params.starAmount }],
-        // No provider_token needed for Stars payments
-      },
+      body,
     );
 
     if (!res.data.ok || !res.data.result) {
@@ -205,6 +213,116 @@ export class TelegramService {
     }
 
     return res.data.result; // direct invoice URL
+  }
+
+  /**
+   * Creates a Telegram invoice link for credit card payment via provider.
+   *
+   * Supported currencies: USD, EUR, GBP, JPY, CNY, etc.
+   * Non-recurring: payment is one-time or handled separately for renewals.
+   * Requires a valid provider_token configured in BotFather.
+   *
+   * Available providers:
+   * - "stripe": Card payments via Stripe
+   * - Others: Telegram may add additional providers
+   *
+   * @param params.title        Short invoice title (max 32 chars)
+   * @param params.description  Invoice description (max 255 chars)
+   * @param params.payload      Custom payload sent back in successful_payment (max 128 bytes)
+   * @param params.providerToken Valid provider token from BotFather (for Stripe, etc.)
+   * @param params.currency     Three-letter ISO 4217 currency code (USD, EUR, GBP, etc.)
+   * @param params.amount       Total amount in smallest currency unit (e.g., cents for USD)
+   * @returns direct invoice link (t.me/...)
+   * @throws Error if provider_token is invalid or missing
+   */
+  async createCardInvoiceLink(params: {
+    title: string;
+    description: string;
+    payload: string;
+    providerToken: string;
+    currency: string;  // e.g., 'USD', 'EUR', 'GBP'
+    amount: number;     // in smallest units: cents for USD, etc.
+  }): Promise<string> {
+    if (!params.providerToken) {
+      throw new Error('providerToken is required for card payments but was not configured');
+    }
+
+    const body: Record<string, unknown> = {
+      title: params.title.slice(0, 32),
+      description: params.description.slice(0, 255),
+      payload: params.payload.slice(0, 128),
+      provider_token: params.providerToken,  // Must be non-empty for card payments
+      currency: params.currency.toUpperCase(), // 'USD', 'EUR', etc.
+      prices: [{ label: params.title.slice(0, 32), amount: params.amount }],
+    };
+
+    const res = await axios.post<{ ok: boolean; result: string }>(
+      `${this.apiUrl}/createInvoiceLink`,
+      body,
+    );
+
+    if (!res.data.ok || !res.data.result) {
+      throw new Error(`Telegram createInvoiceLink (card) failed: ${JSON.stringify(res.data)}`);
+    }
+
+    this.logger.log(
+      `[TG] Card invoice created: currency=${params.currency}, amount=${params.amount}`,
+    );
+
+    return res.data.result; // direct invoice URL
+  }
+
+  /**
+   * Call with isCanceled=true to cancel at period end.
+   * Call with isCanceled=false to re-enable a cancelled subscription.
+   *
+   * @see https://core.telegram.org/bots/api#edituserstarsubscription
+   */
+  async editUserStarSubscription(
+    userId: number,
+    telegramPaymentChargeId: string,
+    isCanceled: boolean,
+  ): Promise<void> {
+    try {
+      await axios.post(`${this.apiUrl}/editUserStarSubscription`, {
+        user_id: userId,
+        telegram_payment_charge_id: telegramPaymentChargeId,
+        is_canceled: isCanceled,
+      });
+      this.logger.log(
+        `[TG] editUserStarSubscription user=${userId} canceled=${isCanceled}`,
+      );
+    } catch (err: any) {
+      this.logger.error(
+        `[TG] editUserStarSubscription failed user=${userId}: ${err?.response?.data?.description ?? err.message}`,
+      );
+      throw err;
+    }
+  }
+
+  /**
+   * Refund a Stars payment to the user.
+   *
+   * @see https://core.telegram.org/bots/api#refundstarpayment
+   */
+  async refundStarPayment(
+    userId: number,
+    telegramPaymentChargeId: string,
+  ): Promise<void> {
+    try {
+      await axios.post(`${this.apiUrl}/refundStarPayment`, {
+        user_id: userId,
+        telegram_payment_charge_id: telegramPaymentChargeId,
+      });
+      this.logger.log(
+        `[TG] refundStarPayment user=${userId} chargeId=${telegramPaymentChargeId}`,
+      );
+    } catch (err: any) {
+      this.logger.error(
+        `[TG] refundStarPayment failed user=${userId}: ${err?.response?.data?.description ?? err.message}`,
+      );
+      throw err;
+    }
   }
 
   /**
@@ -242,6 +360,22 @@ export class TelegramService {
       `⭐ <b>Renewal reminder</b>\n\n` +
       `Your <b>${data.planName}</b> plan expires in <b>${data.daysLeft} day${data.daysLeft !== 1 ? 's' : ''}</b> (${untilStr}).\n\n` +
       `Open the app to renew for another month with <b>${data.starsAmount} Stars</b>.`;
+    await this.sendMessage(chatId, text);
+  }
+
+  /**
+   * Notify the user that their Stars subscription was cancelled.
+   * Access is retained until accessUntil date.
+   */
+  async notifyStarsCancellation(chatId: number, data: { accessUntil: Date | null }): Promise<void> {
+    const untilStr = data.accessUntil
+      ? data.accessUntil.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+      : 'end of billing period';
+    const text =
+      `⭐ <b>Subscription cancelled</b>\n\n` +
+      `Your Telegram Stars subscription has been cancelled.\n` +
+      `You will retain premium access until <b>${untilStr}</b>.\n\n` +
+      `You can resubscribe anytime from the app.`;
     await this.sendMessage(chatId, text);
   }
 }

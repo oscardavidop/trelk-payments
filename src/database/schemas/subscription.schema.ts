@@ -116,11 +116,11 @@ export class Subscription extends Document {
     // Defaults to 'paypal' for all existing records (backward compatible).
     @Prop({
         type: String,
-        enum: ['paypal', 'telegram_stars'],
+        enum: ['paypal', 'telegram_stars', 'telegram_card'],
         default: 'paypal',
         index: true,
     })
-    provider?: 'paypal' | 'telegram_stars';
+    provider?: 'paypal' | 'telegram_stars' | 'telegram_card';
 
     // ── Telegram Stars fields ────────────────────────────────────────────
     // telegram_charge_id: Telegram's unique charge identifier.

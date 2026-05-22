@@ -81,6 +81,7 @@ export class TelegramPaymentService {
       description: `${displayName} subscription for 30 days of premium access.`,
       payload,
       starAmount: plan.stars_price,
+      subscriptionPeriod: 2592000,  // Telegram native auto-recurring every 30 days
     });
 
     this.appLogger.info(
@@ -92,6 +93,72 @@ export class TelegramPaymentService {
       planName: plan.name,
       starsAmount: plan.stars_price,
       priceUsd: plan.price,
+    };
+  }
+
+  /**
+   * Creates a Telegram invoice link for credit card payment (USD) for the given plan.
+   *
+   * Returns the invoice URL to pass to `Telegram.WebApp.openInvoice()`.
+   *
+   * The invoice payload encodes { tgId, planName } so the bot can correlate
+   * the `successful_payment` event without any extra state.
+   * 
+   * Requires TELEGRAM_PROVIDER_TOKEN to be configured (from BotFather).
+   */
+  async createCardInvoice(tgId: number, planName: string): Promise<{
+    invoiceUrl: string;
+    planName: string;
+    priceUsd: number;
+    currency: string;
+    amountCents: number;
+  }> {
+    const providerToken = process.env.TELEGRAM_PROVIDER_TOKEN;
+    if (!providerToken) {
+      throw new BadRequestException(
+        'Card payments are not configured. Provider token is missing.',
+      );
+    }
+
+    const plan = await this.planModel
+      .findOne({ name: planName.toLowerCase(), active: true })
+      .lean() as any;
+
+    if (!plan) {
+      throw new NotFoundException(`Plan "${planName}" not found or inactive`);
+    }
+
+    if (!plan.price || plan.price < 0.01) {
+      throw new BadRequestException(
+        `Plan "${planName}" does not have a valid price for card payments`,
+      );
+    }
+
+    // Build a compact, URL-safe payload (max 128 bytes)
+    const payload = this.buildPayload(tgId, plan.name);
+
+    const displayName = plan.name.charAt(0).toUpperCase() + plan.name.slice(1);
+    const amountCents = Math.round(plan.price * 100); // Convert USD to cents
+
+    const invoiceUrl = await this.telegramService.createCardInvoiceLink({
+      title: `${displayName} — 30 days`,
+      description: `${displayName} subscription for 30 days of premium access.`,
+      payload,
+      providerToken,
+      currency: 'USD',
+      amount: amountCents,
+    });
+
+    this.appLogger.info(
+      `Card invoice created for user ${tgId}: plan=${plan.name}, price=${plan.price} USD`,
+    );
+
+    return {
+      invoiceUrl,
+      planName: plan.name,
+      priceUsd: plan.price,
+      currency: 'USD',
+      amountCents,
     };
   }
 
@@ -111,14 +178,30 @@ export class TelegramPaymentService {
    * 3. Create/renew subscription record
    * 4. Activate features on user
    * 5. Send confirmation notification
+   *
+   * For Telegram native recurring subscriptions:
+   * - is_first_recurring=true → first payment, create new subscription
+   * - is_recurring=true → Telegram auto-renewed, extend access using subscription_expiration_date
    */
   async handleSuccessfulPayment(params: {
     tgId: number;
     telegramChargeId: string;
     invoicePayload: string;
     totalAmount: number;   // Stars paid
+    method?: 'telegram_stars' | 'telegram_card';
+    currency?: string;
+    isFirstRecurring?: boolean;
+    isRecurring?: boolean;
+    subscriptionExpirationDate?: number; // Unix timestamp from Telegram
   }): Promise<{ ok: boolean; subscriptionId: string; accessUntil: Date }> {
-    const { tgId, telegramChargeId, invoicePayload, totalAmount } = params;
+    const {
+      tgId, telegramChargeId, invoicePayload, totalAmount,
+      method, currency,
+      isFirstRecurring, isRecurring, subscriptionExpirationDate,
+    } = params;
+
+    const paymentMethod = method === 'telegram_card' ? 'telegram_card' : 'telegram_stars';
+    const paymentCurrency = (currency ?? (paymentMethod === 'telegram_card' ? 'USD' : 'XTR')).toUpperCase();
 
     // ── 1. Idempotency: skip if we already processed this charge ─────────────
     const existing = await this.subscriptionModel.findOne({
@@ -126,7 +209,7 @@ export class TelegramPaymentService {
     }).lean();
 
     if (existing) {
-      this.logger.log(`Stars payment already processed: ${telegramChargeId}`);
+      this.logger.log(`Telegram payment already processed: ${telegramChargeId}`);
       const sub = existing as any;
       return {
         ok: true,
@@ -139,7 +222,7 @@ export class TelegramPaymentService {
     const parsed = this.parsePayload(invoicePayload);
     if (!parsed || parsed.tgId !== tgId) {
       this.logger.warn(
-        `Stars payload mismatch: tgId=${tgId}, parsed=${JSON.stringify(parsed)}`,
+        `Telegram payment payload mismatch: tgId=${tgId}, parsed=${JSON.stringify(parsed)}`,
       );
       throw new BadRequestException('Invalid invoice payload');
     }
@@ -154,29 +237,48 @@ export class TelegramPaymentService {
 
     // ── 4. Compute access window ─────────────────────────────────────────────
     const now = new Date();
-    const accessUntil = new Date(now);
-    accessUntil.setDate(accessUntil.getDate() + STARS_ACCESS_DAYS);
 
-    // Synthetic subscription ID: STARS-<hash of chargeId>
-    const subscriptionId = `${STARS_SUB_ID_PREFIX}-${this.shortHash(telegramChargeId)}`;
+    // For Stars recurring: use subscription_expiration_date as authoritative expiry.
+    // For card payments: Telegram provider flow is one-time (manual renewal in app).
+    let accessUntil: Date;
+    if (paymentMethod === 'telegram_stars' && subscriptionExpirationDate && subscriptionExpirationDate > 0) {
+      accessUntil = new Date(subscriptionExpirationDate * 1000);
+    } else {
+      accessUntil = new Date(now);
+      accessUntil.setDate(accessUntil.getDate() + STARS_ACCESS_DAYS);
+    }
+
+    // Synthetic subscription ID prefix per Telegram method
+    const subscriptionPrefix = paymentMethod === 'telegram_card' ? 'TGCARD' : STARS_SUB_ID_PREFIX;
+    const subscriptionId = `${subscriptionPrefix}-${this.shortHash(telegramChargeId)}`;
     const userId = String(tgId);
 
-    // ── 5. Check for existing active Stars subscription (renewal) ────────────
+    // ── 5. Check for existing active Telegram subscription (same provider) ───
     const activeStarsSub = await this.subscriptionModel.findOne({
       user_id: userId,
-      provider: 'telegram_stars',
+      provider: paymentMethod,
       status: 'ACTIVE',
     }).lean() as any;
 
     if (activeStarsSub) {
-      // Renewal: extend the expiry date forward
-      const currentExpiry = activeStarsSub.expires_at
-        ? new Date(activeStarsSub.expires_at)
-        : new Date();
-      // If still in active period, add 30 days from current expiry
-      const baseDate = currentExpiry > now ? currentExpiry : now;
-      const renewedUntil = new Date(baseDate);
-      renewedUntil.setDate(renewedUntil.getDate() + STARS_ACCESS_DAYS);
+      // Renewal:
+      // - Stars recurring can use Telegram subscription_expiration_date
+      // - Card payments extend from current expiry (manual renewals)
+      let renewedUntil: Date;
+      if (
+        paymentMethod === 'telegram_stars'
+        && subscriptionExpirationDate
+        && subscriptionExpirationDate > 0
+      ) {
+        renewedUntil = new Date(subscriptionExpirationDate * 1000);
+      } else {
+        const currentExpiry = activeStarsSub.expires_at
+          ? new Date(activeStarsSub.expires_at)
+          : new Date();
+        const baseDate = currentExpiry > now ? currentExpiry : now;
+        renewedUntil = new Date(baseDate);
+        renewedUntil.setDate(renewedUntil.getDate() + STARS_ACCESS_DAYS);
+      }
 
       await this.subscriptionModel.updateOne(
         { _id: activeStarsSub._id },
@@ -187,20 +289,31 @@ export class TelegramPaymentService {
             telegram_charge_id: telegramChargeId,
             telegram_invoice_payload: invoicePayload,
             amount: totalAmount,
+            currency: paymentCurrency,
             plan_id: plan.plan_id,
           },
         },
       );
 
       await this.activateUserFeatures(tgId, planName);
-      await this.telegramService.notifyStarsPaymentReceived(tgId, {
-        planName: plan.name.charAt(0).toUpperCase() + plan.name.slice(1),
-        starsAmount: totalAmount,
-        accessUntil: renewedUntil,
-      }).catch((e) => this.logger.error('Notify failed', e));
+
+      if (paymentMethod === 'telegram_stars') {
+        await this.telegramService.notifyStarsPaymentReceived(tgId, {
+          planName: plan.name.charAt(0).toUpperCase() + plan.name.slice(1),
+          starsAmount: totalAmount,
+          accessUntil: renewedUntil,
+        }).catch((e) => this.logger.error('Notify failed', e));
+      } else {
+        await this.telegramService.notifySubscriptionActivated(tgId, {
+          planName: plan.name,
+          amount: totalAmount / 100,
+          currency: paymentCurrency,
+          nextBillingDate: renewedUntil,
+        }).catch((e) => this.logger.error('Notify failed', e));
+      }
 
       this.appLogger.info(
-        `Stars renewal processed: user=${tgId}, plan=${planName}, until=${renewedUntil.toISOString()}`,
+        `Telegram renewal processed: user=${tgId}, method=${paymentMethod}, plan=${planName}, until=${renewedUntil.toISOString()}`,
       );
 
       return { ok: true, subscriptionId: activeStarsSub.paypal_subscription_id, accessUntil: renewedUntil };
@@ -217,12 +330,12 @@ export class TelegramPaymentService {
     await this.subscriptionModel.create({
       paypal_subscription_id: subscriptionId,
       plan_id: plan.plan_id,
-      provider: 'telegram_stars',
+      provider: paymentMethod,
       status: 'ACTIVE',
       user_id: userId,
       start_time: now.toISOString(),
       amount: totalAmount,
-      currency: 'XTR',
+      currency: paymentCurrency,
       next_billing_date: accessUntil,
       expires_at: accessUntil,
       telegram_charge_id: telegramChargeId,
@@ -234,14 +347,23 @@ export class TelegramPaymentService {
 
     await this.activateUserFeatures(tgId, planName);
 
-    await this.telegramService.notifyStarsPaymentReceived(tgId, {
-      planName: plan.name.charAt(0).toUpperCase() + plan.name.slice(1),
-      starsAmount: totalAmount,
-      accessUntil,
-    }).catch((e) => this.logger.error('Notify failed', e));
+    if (paymentMethod === 'telegram_stars') {
+      await this.telegramService.notifyStarsPaymentReceived(tgId, {
+        planName: plan.name.charAt(0).toUpperCase() + plan.name.slice(1),
+        starsAmount: totalAmount,
+        accessUntil,
+      }).catch((e) => this.logger.error('Notify failed', e));
+    } else {
+      await this.telegramService.notifySubscriptionActivated(tgId, {
+        planName: plan.name,
+        amount: totalAmount / 100,
+        currency: paymentCurrency,
+        nextBillingDate: accessUntil,
+      }).catch((e) => this.logger.error('Notify failed', e));
+    }
 
     this.appLogger.info(
-      `Stars subscription created: user=${tgId}, plan=${planName}, sub=${subscriptionId}, until=${accessUntil.toISOString()}`,
+      `Telegram subscription created: user=${tgId}, method=${paymentMethod}, plan=${planName}, sub=${subscriptionId}, until=${accessUntil.toISOString()}`,
     );
 
     return { ok: true, subscriptionId, accessUntil };
@@ -348,7 +470,7 @@ export class TelegramPaymentService {
           is_pro: true,
           'pro_features.subscription.tier': planName,
           'pro_features.subscription.active': true,
-          'pro_features.subscription.auto_renew': false, // Stars = manual renewal
+          'pro_features.subscription.auto_renew': true, // Stars = Telegram native auto-recurring
         },
       },
     );
@@ -356,21 +478,99 @@ export class TelegramPaymentService {
     this.logger.log(`User ${tgId} activated with Stars plan: ${planName}`);
   }
 
-  /** Builds a compact signed payload: "tgId:planName" */
+  /** Builds a compact signed payload: base64("tgId:planName") — max 128 bytes */
   private buildPayload(tgId: number, planName: string): string {
-    return `${tgId}:${planName}`;
+    return Buffer.from(`${tgId}:${planName}`).toString('base64');
   }
 
-  /** Parses the payload created by buildPayload */
+  /** Parses the payload created by buildPayload (base64-encoded "tgId:planName") */
   private parsePayload(payload: string): { tgId: number; planName: string } | null {
     try {
-      const [idStr, planName] = payload.split(':');
+      const raw = Buffer.from(payload, 'base64').toString('utf8');
+      const colonIdx = raw.indexOf(':');
+      if (colonIdx < 1) return null;
+      const idStr = raw.slice(0, colonIdx);
+      const planName = raw.slice(colonIdx + 1);
       const tgId = parseInt(idStr, 10);
       if (!isFinite(tgId) || !planName) return null;
       return { tgId, planName };
     } catch {
       return null;
     }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // SUBSCRIPTION MANAGEMENT (recurring Stars)
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Cancels a Telegram Stars recurring subscription at period end.
+   * After cancellation the user retains access until expires_at, then loses it.
+   */
+  async cancelStarSubscription(tgId: number): Promise<{ ok: boolean; accessUntil: Date | null }> {
+    const sub = await this.subscriptionModel.findOne({
+      user_id: String(tgId),
+      provider: 'telegram_stars',
+      status: 'ACTIVE',
+    }).lean() as any;
+
+    if (!sub) {
+      throw new NotFoundException('No active Stars subscription found');
+    }
+
+    const chargeId: string = sub.telegram_charge_id;
+    if (!chargeId) {
+      throw new BadRequestException('Subscription has no charge ID for cancellation');
+    }
+
+    // Cancel the Telegram recurring subscription
+    await this.telegramService.editUserStarSubscription(tgId, chargeId, true);
+
+    // Mark as cancel-at-period-end in our DB
+    await this.subscriptionModel.updateOne(
+      { _id: sub._id },
+      { $set: { cancel_at_period_end: true } },
+    );
+
+    // Update user's auto_renew flag
+    await this.userModel.updateOne(
+      { id: tgId },
+      { $set: { 'pro_features.subscription.auto_renew': false } },
+    );
+
+    const accessUntil = sub.expires_at ? new Date(sub.expires_at) : null;
+
+    // Notify user
+    await this.telegramService.notifyStarsCancellation(tgId, { accessUntil }).catch(
+      (e) => this.logger.error('Cancel notify failed', e),
+    );
+
+    this.appLogger.info(`Stars subscription cancelled for user ${tgId}, access until ${accessUntil?.toISOString()}`);
+
+    return { ok: true, accessUntil };
+  }
+
+  /**
+   * Issues a Stars refund for a given charge ID.
+   * This is called from an admin endpoint (e.g., in response to a /paysupport ticket).
+   */
+  async refundStarPayment(tgId: number, chargeId: string): Promise<{ ok: boolean }> {
+    await this.telegramService.refundStarPayment(tgId, chargeId);
+
+    // Mark subscription as refunded/expired
+    await this.subscriptionModel.updateOne(
+      { telegram_charge_id: chargeId },
+      { $set: { status: 'REFUNDED', cancel_at_period_end: false } },
+    );
+
+    // Downgrade user
+    await this.userModel.updateOne(
+      { id: tgId },
+      { $set: { is_pro: false } },
+    );
+
+    this.appLogger.info(`Stars refund issued: user=${tgId}, charge=${chargeId}`);
+    return { ok: true };
   }
 
   /** Short deterministic hash prefix for synthetic subscription IDs */
