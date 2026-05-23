@@ -75,6 +75,18 @@ export class CancelStarSubscriptionDto {
   tg_id: number;
 }
 
+export class ToggleTelegramAutoRenewDto {
+  /** Telegram user ID whose subscription should be updated */
+  @IsInt()
+  @IsPositive()
+  @Type(() => Number)
+  tg_id: number;
+
+  /** Whether renewal should remain enabled */
+  @IsBoolean()
+  auto_renew: boolean;
+}
+
 export class RefundStarPaymentDto {
   /** Telegram user ID to refund */
   @IsInt()

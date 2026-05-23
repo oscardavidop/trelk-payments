@@ -5,6 +5,7 @@ import {
   Body,
   Query,
   BadRequestException,
+  ConflictException,
   HttpException,
   HttpStatus,
   UnauthorizedException,
@@ -228,22 +229,24 @@ export class PaypalController {
       throw new UnauthorizedException('You do not own this subscription');
     }
 
-    try {
-      await this.paypalService.cancelSubscription(body.subscription_id);
-      await this.subscriptionService.cancelSubscription(body.subscription_id);
-      return { status: 'cancelled' };
-    } catch (error: any) {
-      if (
-        error instanceof UnauthorizedException ||
-        error instanceof BadRequestException
-      ) {
-        throw error;
+    return this.withLifecycleLock(`sub:${body.subscription_id}`, 'cancel', async () => {
+      try {
+        await this.paypalService.cancelSubscription(body.subscription_id);
+        await this.subscriptionService.cancelSubscription(body.subscription_id);
+        return { status: 'cancelled' };
+      } catch (error: any) {
+        if (
+          error instanceof UnauthorizedException ||
+          error instanceof BadRequestException
+        ) {
+          throw error;
+        }
+        throw new HttpException(
+          'Failed to cancel subscription',
+          HttpStatus.INTERNAL_SERVER_ERROR,
+        );
       }
-      throw new HttpException(
-        'Failed to cancel subscription',
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
-    }
+    });
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -329,38 +332,40 @@ export class PaypalController {
       );
     }
 
-    try {
-      const { subscriptionId, approvalUrl } = await this.paypalService.createSubscriptionLink(
-        body.plan_id,
-        body.return_url,
-        body.cancel_url,
-        String(body.tg_id),
-        body.start_time,
-      );
+    return this.withLifecycleLock(`user:${body.tg_id}`, 'create', async () => {
+      try {
+        const { subscriptionId, approvalUrl } = await this.paypalService.createSubscriptionLink(
+          body.plan_id,
+          body.return_url,
+          body.cancel_url,
+          String(body.tg_id),
+          body.start_time,
+        );
 
-      // Pre-registrar en DB para que el webhook pueda correlacionarla
-      await this.subscriptionService.createSubscriptionIfNotExists({
-        paypal_subscription_id: subscriptionId,
-        plan_id: body.plan_id,
-        user_id: String(body.tg_id),
-        status: 'APPROVAL_PENDING',
-        features_applied: false,
-        activation_notified: false,
-      });
+        // Pre-registrar en DB para que el webhook pueda correlacionarla
+        await this.subscriptionService.createSubscriptionIfNotExists({
+          paypal_subscription_id: subscriptionId,
+          plan_id: body.plan_id,
+          user_id: String(body.tg_id),
+          status: 'APPROVAL_PENDING',
+          features_applied: false,
+          activation_notified: false,
+        });
 
-      this.logger.log(
-        `Subscription created for user ${body.tg_id}: ${subscriptionId} (plan: ${body.plan_id})`,
-      );
+        this.logger.log(
+          `Subscription created for user ${body.tg_id}: ${subscriptionId} (plan: ${body.plan_id})`,
+        );
 
-      return { ok: true, subscriptionId, approvalUrl };
-    } catch (error: any) {
-      console.error(error);
-      if (error instanceof BadRequestException || error instanceof UnauthorizedException) {
-        throw error;
+        return { ok: true, subscriptionId, approvalUrl };
+      } catch (error: any) {
+        console.error(error);
+        if (error instanceof BadRequestException || error instanceof UnauthorizedException) {
+          throw error;
+        }
+        this.logger.error(`Failed to create subscription for user ${body.tg_id}: ${error?.message}`);
+        throw new HttpException('Failed to create subscription', HttpStatus.BAD_GATEWAY);
       }
-      this.logger.error(`Failed to create subscription for user ${body.tg_id}: ${error?.message}`);
-      throw new HttpException('Failed to create subscription', HttpStatus.BAD_GATEWAY);
-    }
+    });
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -430,33 +435,35 @@ export class PaypalController {
       throw new BadRequestException('Subscription is already on this plan');
     }
 
-    try {
-      const { approvalUrl } = await this.paypalService.reviseSubscriptionPlan(
-        body.subscription_id,
-        body.new_plan_id,
-        body.return_url,
-        body.cancel_url,
-      );
+    return this.withLifecycleLock(`sub:${body.subscription_id}`, 'revise', async () => {
+      try {
+        const { approvalUrl } = await this.paypalService.reviseSubscriptionPlan(
+          body.subscription_id,
+          body.new_plan_id,
+          body.return_url,
+          body.cancel_url,
+        );
 
-      this.logger.log(
-        `Subscription revise initiated: ${body.subscription_id} → plan ${body.new_plan_id} (user ${body.tg_id})`,
-      );
+        this.logger.log(
+          `Subscription revise initiated: ${body.subscription_id} → plan ${body.new_plan_id} (user ${body.tg_id})`,
+        );
 
-      return {
-        ok: true,
-        approvalUrl: approvalUrl ?? null,
-        requiresApproval: approvalUrl !== null,
-      };
-    } catch (error: any) {
-      if (
-        error instanceof BadRequestException ||
-        error instanceof UnauthorizedException
-      ) {
-        throw error;
+        return {
+          ok: true,
+          approvalUrl: approvalUrl ?? null,
+          requiresApproval: approvalUrl !== null,
+        };
+      } catch (error: any) {
+        if (
+          error instanceof BadRequestException ||
+          error instanceof UnauthorizedException
+        ) {
+          throw error;
+        }
+        this.logger.error(`Failed to revise subscription ${body.subscription_id}: ${error?.message}`);
+        throw new HttpException('Failed to revise subscription', HttpStatus.BAD_GATEWAY);
       }
-      this.logger.error(`Failed to revise subscription ${body.subscription_id}: ${error?.message}`);
-      throw new HttpException('Failed to revise subscription', HttpStatus.BAD_GATEWAY);
-    }
+    });
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -497,22 +504,24 @@ export class PaypalController {
       );
     }
 
-    try {
-      await this.paypalService.activateSubscription(body.subscription_id);
-      await this.subscriptionService.resumeSubscription(body.subscription_id);
+    return this.withLifecycleLock(`sub:${body.subscription_id}`, 'resume', async () => {
+      try {
+        await this.paypalService.activateSubscription(body.subscription_id);
+        await this.subscriptionService.resumeSubscription(body.subscription_id);
 
-      this.logger.log(`Subscription resumed: ${body.subscription_id} (user ${body.tg_id})`);
-      return { ok: true, status: 'resumed' };
-    } catch (error: any) {
-      if (
-        error instanceof BadRequestException ||
-        error instanceof UnauthorizedException
-      ) {
-        throw error;
+        this.logger.log(`Subscription resumed: ${body.subscription_id} (user ${body.tg_id})`);
+        return { ok: true, status: 'resumed' };
+      } catch (error: any) {
+        if (
+          error instanceof BadRequestException ||
+          error instanceof UnauthorizedException
+        ) {
+          throw error;
+        }
+        this.logger.error(`Failed to resume subscription ${body.subscription_id}: ${error?.message}`);
+        throw new HttpException('Failed to resume subscription', HttpStatus.BAD_GATEWAY);
       }
-      this.logger.error(`Failed to resume subscription ${body.subscription_id}: ${error?.message}`);
-      throw new HttpException('Failed to resume subscription', HttpStatus.BAD_GATEWAY);
-    }
+    });
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -551,43 +560,45 @@ export class PaypalController {
       throw new UnauthorizedException('You do not own this subscription');
     }
 
-    try {
-      if (body.auto_renew) {
-        // Reactivar: solo si está suspendida
-        if (subscription.status !== 'SUSPENDED') {
-          throw new BadRequestException(
-            `Cannot activate a subscription in ${subscription.status} status`,
+    return this.withLifecycleLock(`sub:${body.subscription_id}`, 'auto-renew', async () => {
+      try {
+        if (body.auto_renew) {
+          // Reactivar: solo si está suspendida
+          if (subscription.status !== 'SUSPENDED') {
+            throw new BadRequestException(
+              `Cannot activate a subscription in ${subscription.status} status`,
+            );
+          }
+          await this.paypalService.activateSubscription(body.subscription_id);
+          await this.subscriptionService.resumeSubscription(body.subscription_id);
+          this.logger.log(`Auto-renew enabled (activated): ${body.subscription_id} (user ${body.tg_id})`);
+          return { ok: true, auto_renew: true, status: 'ACTIVE' };
+        } else {
+          // Suspender: solo si está activa
+          if (subscription.status !== 'ACTIVE') {
+            throw new BadRequestException(
+              `Cannot suspend a subscription in ${subscription.status} status`,
+            );
+          }
+          await this.paypalService.suspendSubscription(
+            body.subscription_id,
+            'Customer-requested pause',
           );
+          await this.subscriptionService.suspendSubscription(body.subscription_id);
+          this.logger.log(`Auto-renew disabled (suspended): ${body.subscription_id} (user ${body.tg_id})`);
+          return { ok: true, auto_renew: false, status: 'SUSPENDED' };
         }
-        await this.paypalService.activateSubscription(body.subscription_id);
-        await this.subscriptionService.resumeSubscription(body.subscription_id);
-        this.logger.log(`Auto-renew enabled (activated): ${body.subscription_id} (user ${body.tg_id})`);
-        return { ok: true, auto_renew: true, status: 'ACTIVE' };
-      } else {
-        // Suspender: solo si está activa
-        if (subscription.status !== 'ACTIVE') {
-          throw new BadRequestException(
-            `Cannot suspend a subscription in ${subscription.status} status`,
-          );
+      } catch (error: any) {
+        if (
+          error instanceof BadRequestException ||
+          error instanceof UnauthorizedException
+        ) {
+          throw error;
         }
-        await this.paypalService.suspendSubscription(
-          body.subscription_id,
-          'Customer-requested pause',
-        );
-        await this.subscriptionService.suspendSubscription(body.subscription_id);
-        this.logger.log(`Auto-renew disabled (suspended): ${body.subscription_id} (user ${body.tg_id})`);
-        return { ok: true, auto_renew: false, status: 'SUSPENDED' };
+        this.logger.error(`Failed to set auto-renew for ${body.subscription_id}: ${error?.message}`);
+        throw new HttpException('Failed to update subscription renewal', HttpStatus.BAD_GATEWAY);
       }
-    } catch (error: any) {
-      if (
-        error instanceof BadRequestException ||
-        error instanceof UnauthorizedException
-      ) {
-        throw error;
-      }
-      this.logger.error(`Failed to set auto-renew for ${body.subscription_id}: ${error?.message}`);
-      throw new HttpException('Failed to update subscription renewal', HttpStatus.BAD_GATEWAY);
-    }
+    });
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -624,26 +635,44 @@ export class PaypalController {
       throw new BadRequestException('No scheduled downgrade to cancel');
     }
 
-    try {
-      const { approvalUrl } = await this.subscriptionService.cancelScheduledDowngrade(
-        body.subscription_id,
-        body.return_url,
-        body.cancel_url,
-      );
+    return this.withLifecycleLock(`sub:${body.subscription_id}`, 'cancel-downgrade', async () => {
+      try {
+        const { approvalUrl } = await this.subscriptionService.cancelScheduledDowngrade(
+          body.subscription_id,
+          body.return_url,
+          body.cancel_url,
+        );
 
-      this.logger.log(
-        `Downgrade cancel initiated for ${body.subscription_id} (user ${body.tg_id}), requiresApproval=${!!approvalUrl}`,
+        this.logger.log(
+          `Downgrade cancel initiated for ${body.subscription_id} (user ${body.tg_id}), requiresApproval=${!!approvalUrl}`,
+        );
+        return {
+          ok: true,
+          approvalUrl: approvalUrl ?? null,
+          requiresApproval: !!approvalUrl,
+          status: approvalUrl ? 'approval_required' : 'downgrade_cancelled',
+        };
+      } catch (error: any) {
+        if (error instanceof BadRequestException || error instanceof UnauthorizedException) throw error;
+        this.logger.error(`Failed to cancel downgrade for ${body.subscription_id}: ${error?.message}`);
+        throw new HttpException('Failed to cancel scheduled downgrade', HttpStatus.BAD_GATEWAY);
+      }
+    });
+  }
+
+  private async withLifecycleLock<T>(resource: string, action: string, fn: () => Promise<T>): Promise<T> {
+    const lockResource = `paypal:lifecycle:${resource}`;
+    const lockToken = await this.redisService.acquireLock(lockResource, 15_000);
+    if (!lockToken) {
+      throw new ConflictException(
+        `Another subscription operation is already in progress (${action}). Please retry in a few seconds.`,
       );
-      return {
-        ok: true,
-        approvalUrl: approvalUrl ?? null,
-        requiresApproval: !!approvalUrl,
-        status: approvalUrl ? 'approval_required' : 'downgrade_cancelled',
-      };
-    } catch (error: any) {
-      if (error instanceof BadRequestException || error instanceof UnauthorizedException) throw error;
-      this.logger.error(`Failed to cancel downgrade for ${body.subscription_id}: ${error?.message}`);
-      throw new HttpException('Failed to cancel scheduled downgrade', HttpStatus.BAD_GATEWAY);
+    }
+
+    try {
+      return await fn();
+    } finally {
+      await this.redisService.releaseLock(lockResource, lockToken);
     }
   }
 

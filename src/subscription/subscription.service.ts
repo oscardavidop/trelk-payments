@@ -174,6 +174,7 @@ export class SubscriptionService {
         id: subscription.paypal_subscription_id,
         plan_id: subscription.plan_id,
         status: subscription.status,
+        provider: subscription.provider ?? 'paypal',
         next_billing_date: subscription.next_billing_date ?? null,
         amount: subscription.amount ?? null,
         currency: subscription.currency ?? 'USD',

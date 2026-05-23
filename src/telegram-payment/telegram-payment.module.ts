@@ -10,6 +10,7 @@ import {
 } from '../database/schemas/subscription.schema';
 import { Plan, PlanSchema } from '../database/schemas/plan.schema';
 import { User, UserSchema } from '../database/schemas/user.schema';
+import { PayPalEvent, PayPalEventSchema } from '../database/schemas/paypal-event.schema';
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { User, UserSchema } from '../database/schemas/user.schema';
       [
         { name: Subscription.name, schema: SubscriptionSchema },
         { name: Plan.name, schema: PlanSchema },
+        { name: PayPalEvent.name, schema: PayPalEventSchema },
       ],
       'payments',
     ),

@@ -378,4 +378,29 @@ export class TelegramService {
       `You can resubscribe anytime from the app.`;
     await this.sendMessage(chatId, text);
   }
+
+  /**
+   * Provider-aware cancellation notification for Telegram subscriptions.
+   */
+  async notifyTelegramSubscriptionCancellation(
+    chatId: number,
+    data: { accessUntil: Date | null; provider: 'telegram_stars' | 'telegram_card' },
+  ): Promise<void> {
+    if (data.provider === 'telegram_stars') {
+      await this.notifyStarsCancellation(chatId, { accessUntil: data.accessUntil });
+      return;
+    }
+
+    const untilStr = data.accessUntil
+      ? data.accessUntil.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+      : 'end of billing period';
+
+    const text =
+      `💳 <b>Subscription cancelled</b>\n\n` +
+      `Your Telegram card subscription has been cancelled.\n` +
+      `You will retain premium access until <b>${untilStr}</b>.\n\n` +
+      `You can renew anytime from the app.`;
+
+    await this.sendMessage(chatId, text);
+  }
 }

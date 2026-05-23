@@ -7,6 +7,7 @@ import {
   Req,
   UnauthorizedException,
   BadRequestException,
+  ConflictException,
   HttpException,
   HttpStatus,
   Logger,
@@ -19,8 +20,10 @@ import {
   CancelStarSubscriptionDto,
   RefundStarPaymentDto,
   CreateCardInvoiceDto,
+  ToggleTelegramAutoRenewDto,
 } from './dto/create-stars-invoice.dto';
 import { LoggerService } from '../common/logger.service';
+import { RedisService } from '../redis/redis.service';
 
 @Controller('telegram-payment')
 export class TelegramPaymentController {
@@ -29,6 +32,7 @@ export class TelegramPaymentController {
   constructor(
     private readonly telegramPaymentService: TelegramPaymentService,
     private readonly loggerService: LoggerService,
+    private readonly redisService: RedisService,
   ) {}
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -52,28 +56,30 @@ export class TelegramPaymentController {
       throw new BadRequestException('tg_id and plan_name are required');
     }
 
-    try {
-      const result = await this.telegramPaymentService.createStarsInvoice(
-        body.tg_id,
-        body.plan_name,
-      );
+    return this.withLifecycleLock(`tg:${body.tg_id}`, 'create-stars-invoice', async () => {
+      try {
+        const result = await this.telegramPaymentService.createStarsInvoice(
+          body.tg_id,
+          body.plan_name,
+        );
 
-      this.logger.log(
-        `Stars invoice created: tg_id=${body.tg_id}, plan=${result.planName}, stars=${result.starsAmount}`,
-      );
+        this.logger.log(
+          `Stars invoice created: tg_id=${body.tg_id}, plan=${result.planName}, stars=${result.starsAmount}`,
+        );
 
-      return {
-        ok: true,
-        invoiceUrl: result.invoiceUrl,
-        planName: result.planName,
-        starsAmount: result.starsAmount,
-        priceUsd: result.priceUsd,
-      };
-    } catch (err: any) {
-      if (err instanceof BadRequestException || err.status === 404) throw err;
-      this.logger.error(`Failed to create Stars invoice: ${err?.message}`);
-      throw new HttpException('Failed to create invoice', HttpStatus.BAD_GATEWAY);
-    }
+        return {
+          ok: true,
+          invoiceUrl: result.invoiceUrl,
+          planName: result.planName,
+          starsAmount: result.starsAmount,
+          priceUsd: result.priceUsd,
+        };
+      } catch (err: any) {
+        if (err instanceof BadRequestException || err.status === 404) throw err;
+        this.logger.error(`Failed to create Stars invoice: ${err?.message}`);
+        throw new HttpException('Failed to create invoice', HttpStatus.BAD_GATEWAY);
+      }
+    });
   }
 
   /**
@@ -95,29 +101,31 @@ export class TelegramPaymentController {
       throw new BadRequestException('tg_id and plan_name are required');
     }
 
-    try {
-      const result = await this.telegramPaymentService.createCardInvoice(
-        body.tg_id,
-        body.plan_name,
-      );
+    return this.withLifecycleLock(`tg:${body.tg_id}`, 'create-card-invoice', async () => {
+      try {
+        const result = await this.telegramPaymentService.createCardInvoice(
+          body.tg_id,
+          body.plan_name,
+        );
 
-      this.logger.log(
-        `Card invoice created: tg_id=${body.tg_id}, plan=${result.planName}, price=${result.priceUsd} ${result.currency}`,
-      );
+        this.logger.log(
+          `Card invoice created: tg_id=${body.tg_id}, plan=${result.planName}, price=${result.priceUsd} ${result.currency}`,
+        );
 
-      return {
-        ok: true,
-        invoiceUrl: result.invoiceUrl,
-        planName: result.planName,
-        priceUsd: result.priceUsd,
-        currency: result.currency,
-        amountCents: result.amountCents,
-      };
-    } catch (err: any) {
-      if (err instanceof BadRequestException || err.status === 404) throw err;
-      this.logger.error(`Failed to create Card invoice: ${err?.message}`);
-      throw new HttpException('Failed to create invoice', HttpStatus.BAD_GATEWAY);
-    }
+        return {
+          ok: true,
+          invoiceUrl: result.invoiceUrl,
+          planName: result.planName,
+          priceUsd: result.priceUsd,
+          currency: result.currency,
+          amountCents: result.amountCents,
+        };
+      } catch (err: any) {
+        if (err instanceof BadRequestException || err.status === 404) throw err;
+        this.logger.error(`Failed to create Card invoice: ${err?.message}`);
+        throw new HttpException('Failed to create invoice', HttpStatus.BAD_GATEWAY);
+      }
+    });
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -141,25 +149,27 @@ export class TelegramPaymentController {
       `Telegram payment webhook: tg_id=${body.tg_id}, method=${body.method ?? 'telegram_stars'}, currency=${body.currency ?? 'XTR'}, charge=${body.telegram_charge_id}`,
     );
 
-    try {
-      const result = await this.telegramPaymentService.handleSuccessfulPayment({
-        tgId: body.tg_id,
-        telegramChargeId: body.telegram_charge_id,
-        invoicePayload: body.invoice_payload,
-        totalAmount: body.total_amount,
-        method: body.method,
-        currency: body.currency,
-        isFirstRecurring: body.is_first_recurring,
-        isRecurring: body.is_recurring,
-        subscriptionExpirationDate: body.subscription_expiration_date,
-      });
+    return this.withLifecycleLock(`charge:${body.telegram_charge_id}`, 'payment-webhook', async () => {
+      try {
+        const result = await this.telegramPaymentService.handleSuccessfulPayment({
+          tgId: body.tg_id,
+          telegramChargeId: body.telegram_charge_id,
+          invoicePayload: body.invoice_payload,
+          totalAmount: body.total_amount,
+          method: body.method,
+          currency: body.currency,
+          isFirstRecurring: body.is_first_recurring,
+          isRecurring: body.is_recurring,
+          subscriptionExpirationDate: body.subscription_expiration_date,
+        });
 
-      return { ok: true, subscriptionId: result.subscriptionId, accessUntil: result.accessUntil };
-    } catch (err: any) {
-      if (err instanceof BadRequestException || err.status === 404) throw err;
-      this.logger.error(`Stars payment webhook failed: ${err?.message}`);
-      throw new HttpException('Payment processing failed', HttpStatus.INTERNAL_SERVER_ERROR);
-    }
+        return { ok: true, subscriptionId: result.subscriptionId, accessUntil: result.accessUntil };
+      } catch (err: any) {
+        if (err instanceof BadRequestException || err.status === 404) throw err;
+        this.logger.error(`Stars payment webhook failed: ${err?.message}`);
+        throw new HttpException('Payment processing failed', HttpStatus.INTERNAL_SERVER_ERROR);
+      }
+    });
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -176,14 +186,42 @@ export class TelegramPaymentController {
   async cancelSubscription(@Body() body: CancelStarSubscriptionDto, @Req() req: any) {
     this.requireApiKey(req);
 
-    try {
-      const result = await this.telegramPaymentService.cancelStarSubscription(body.tg_id);
-      return result;
-    } catch (err: any) {
-      if (err.status === 404 || err instanceof BadRequestException) throw err;
-      this.logger.error(`Stars cancel failed: ${err?.message}`);
-      throw new HttpException('Failed to cancel subscription', HttpStatus.BAD_GATEWAY);
-    }
+    return this.withLifecycleLock(`tg:${body.tg_id}`, 'cancel-subscription', async () => {
+      try {
+        const result = await this.telegramPaymentService.cancelStarSubscription(body.tg_id);
+        return result;
+      } catch (err: any) {
+        if (err.status === 404 || err instanceof BadRequestException) throw err;
+        this.logger.error(`Stars cancel failed: ${err?.message}`);
+        throw new HttpException('Failed to cancel subscription', HttpStatus.BAD_GATEWAY);
+      }
+    });
+  }
+
+  /**
+   * POST /telegram-payment/subscription/auto-renew
+   *
+   * Toggles auto-renew for Telegram Stars or Telegram Card subscriptions.
+   * For Stars, this forwards to Telegram's native recurring subscription API.
+   * For Card, renewal is tracked locally in our database.
+   */
+  @Post('subscription/auto-renew')
+  async autoRenew(@Body() body: ToggleTelegramAutoRenewDto, @Req() req: any) {
+    this.requireApiKey(req);
+
+    return this.withLifecycleLock(`tg:${body.tg_id}`, 'toggle-auto-renew', async () => {
+      try {
+        const result = await this.telegramPaymentService.toggleTelegramAutoRenew(
+          body.tg_id,
+          body.auto_renew,
+        );
+        return result;
+      } catch (err: any) {
+        if (err.status === 404 || err instanceof BadRequestException) throw err;
+        this.logger.error(`Telegram auto-renew toggle failed: ${err?.message}`);
+        throw new HttpException('Failed to update subscription', HttpStatus.BAD_GATEWAY);
+      }
+    });
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -239,6 +277,22 @@ export class TelegramPaymentController {
       return timingSafeEqual(Buffer.from(a), Buffer.from(b));
     } catch {
       return false;
+    }
+  }
+
+  private async withLifecycleLock<T>(resource: string, action: string, fn: () => Promise<T>): Promise<T> {
+    const lockResource = `telegram-payment:lifecycle:${resource}`;
+    const lockToken = await this.redisService.acquireLock(lockResource, 12_000);
+    if (!lockToken) {
+      throw new ConflictException(
+        `Another subscription operation is already in progress (${action}). Please retry in a few seconds.`,
+      );
+    }
+
+    try {
+      return await fn();
+    } finally {
+      await this.redisService.releaseLock(lockResource, lockToken);
     }
   }
 }

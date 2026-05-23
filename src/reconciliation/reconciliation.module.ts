@@ -6,6 +6,7 @@ import { User, UserSchema } from '../database/schemas/user.schema';
 import { Plan, PlanSchema } from '../database/schemas/plan.schema';
 import { PaypalModule } from '../paypal/paypal.module';
 import { TelegramModule } from '../telegram/telegram.module';
+import { TelegramPaymentModule } from '../telegram-payment/telegram-payment.module';
 
 /**
  * ReconciliationModule — WORKER-ONLY
@@ -28,6 +29,7 @@ import { TelegramModule } from '../telegram/telegram.module';
     ),
     PaypalModule,
     TelegramModule,
+    TelegramPaymentModule,
   ],
   providers: [ReconciliationService],
 })

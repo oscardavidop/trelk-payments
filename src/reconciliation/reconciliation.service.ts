@@ -7,6 +7,7 @@ import { User } from '../database/schemas/user.schema';
 import { Plan } from '../database/schemas/plan.schema';
 import { PaypalService } from '../paypal/paypal.service';
 import { TelegramService } from '../telegram/telegram.service';
+import { TelegramPaymentService } from '../telegram-payment/telegram-payment.service';
 
 /**
  * ReconciliationService
@@ -46,6 +47,7 @@ export class ReconciliationService {
     private readonly planModel: Model<Plan>,
     private readonly paypalService: PaypalService,
     private readonly telegramService: TelegramService,
+    private readonly telegramPaymentService: TelegramPaymentService,
   ) {}
 
   // ── Cron 1: Suscripciones ACTIVE sin user_id (huérfanas) ─────────────────
@@ -404,6 +406,32 @@ export class ReconciliationService {
 
     // No eliminar automáticamente — solo reportar para auditoría
     // La eliminación requiere confirmación manual con el equipo de operaciones
+  }
+
+  // ── Cron 7: Expirar suscripciones Telegram vencidas (Stars + Card) ───────
+  @Cron(CronExpression.EVERY_HOUR)
+  async expireStaleTelegramSubscriptions(): Promise<void> {
+    try {
+      const expired = await this.telegramPaymentService.expireStaleStarsSubscriptions();
+      if (expired > 0) {
+        this.logger.log(`[RECONCILIATION] Telegram subscriptions expired: ${expired}`);
+      }
+    } catch (err: any) {
+      this.logger.error(`[RECONCILIATION] Failed to expire Telegram subscriptions: ${err.message}`);
+    }
+  }
+
+  // ── Cron 8: Recordatorios de renovación para Stars ──────────────────────
+  @Cron('0 9 * * *') // diariamente a las 09:00
+  async sendTelegramRenewalReminders(): Promise<void> {
+    try {
+      const sent = await this.telegramPaymentService.sendRenewalReminders();
+      if (sent > 0) {
+        this.logger.log(`[RECONCILIATION] Telegram renewal reminders sent: ${sent}`);
+      }
+    } catch (err: any) {
+      this.logger.error(`[RECONCILIATION] Failed to send Telegram renewal reminders: ${err.message}`);
+    }
   }
 
   // ── Helper privado: self-heal de suscripción huérfana ────────────────────

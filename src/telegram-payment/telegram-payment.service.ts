@@ -12,6 +12,7 @@ import { createHash } from 'crypto';
 import { Subscription } from '../database/schemas/subscription.schema';
 import { Plan } from '../database/schemas/plan.schema';
 import { User } from '../database/schemas/user.schema';
+import { PayPalEvent } from '../database/schemas/paypal-event.schema';
 import { TelegramService } from '../telegram/telegram.service';
 import { LoggerService } from '../common/logger.service';
 
@@ -36,6 +37,8 @@ export class TelegramPaymentService {
     private readonly planModel: Model<Plan>,
     @InjectModel(User.name, 'mbot')
     private readonly userModel: Model<User>,
+    @InjectModel(PayPalEvent.name, 'payments')
+    private readonly paymentEventModel: Model<PayPalEvent>,
     private readonly telegramService: TelegramService,
     private readonly appLogger: LoggerService,
   ) {}
@@ -202,6 +205,9 @@ export class TelegramPaymentService {
 
     const paymentMethod = method === 'telegram_card' ? 'telegram_card' : 'telegram_stars';
     const paymentCurrency = (currency ?? (paymentMethod === 'telegram_card' ? 'USD' : 'XTR')).toUpperCase();
+    const amountForSubscription = paymentMethod === 'telegram_card'
+      ? totalAmount / 100
+      : totalAmount;
 
     // ── 1. Idempotency: skip if we already processed this charge ─────────────
     const existing = await this.subscriptionModel.findOne({
@@ -288,14 +294,38 @@ export class TelegramPaymentService {
             next_billing_date: renewedUntil,
             telegram_charge_id: telegramChargeId,
             telegram_invoice_payload: invoicePayload,
-            amount: totalAmount,
+            amount: amountForSubscription,
             currency: paymentCurrency,
             plan_id: plan.plan_id,
           },
         },
       );
 
-      await this.activateUserFeatures(tgId, planName);
+      await this.recordTelegramEvent({
+        eventId: `${telegramChargeId}:PAYMENT.SALE.COMPLETED`,
+        eventType: 'PAYMENT.SALE.COMPLETED',
+        subscriptionId: activeStarsSub.paypal_subscription_id,
+        summary:
+          paymentMethod === 'telegram_card'
+            ? `Telegram card payment completed (${paymentCurrency} ${amountForSubscription.toFixed(2)})`
+            : `Telegram Stars payment completed (${totalAmount} XTR)`,
+        resource: {
+          id: telegramChargeId,
+          state: 'completed',
+          billing_agreement_id: activeStarsSub.paypal_subscription_id,
+          amount: {
+            total:
+              paymentMethod === 'telegram_card'
+                ? amountForSubscription.toFixed(2)
+                : String(totalAmount),
+            currency: paymentCurrency,
+          },
+          payment_mode: paymentMethod,
+          create_time: now.toISOString(),
+        },
+      });
+
+      await this.activateUserFeatures(tgId, planName, paymentMethod);
 
       if (paymentMethod === 'telegram_stars') {
         await this.telegramService.notifyStarsPaymentReceived(tgId, {
@@ -306,7 +336,7 @@ export class TelegramPaymentService {
       } else {
         await this.telegramService.notifySubscriptionActivated(tgId, {
           planName: plan.name,
-          amount: totalAmount / 100,
+          amount: amountForSubscription,
           currency: paymentCurrency,
           nextBillingDate: renewedUntil,
         }).catch((e) => this.logger.error('Notify failed', e));
@@ -334,7 +364,7 @@ export class TelegramPaymentService {
       status: 'ACTIVE',
       user_id: userId,
       start_time: now.toISOString(),
-      amount: totalAmount,
+      amount: amountForSubscription,
       currency: paymentCurrency,
       next_billing_date: accessUntil,
       expires_at: accessUntil,
@@ -345,7 +375,59 @@ export class TelegramPaymentService {
       cancel_at_period_end: false,
     });
 
-    await this.activateUserFeatures(tgId, planName);
+    await this.recordTelegramEvent({
+      eventId: `${telegramChargeId}:BILLING.SUBSCRIPTION.CREATED`,
+      eventType: 'BILLING.SUBSCRIPTION.CREATED',
+      subscriptionId,
+      summary: `Subscription created via ${paymentMethod}`,
+      resource: {
+        id: subscriptionId,
+        status: 'ACTIVE',
+        plan_id: plan.plan_id,
+        start_time: now.toISOString(),
+        status_update_time: now.toISOString(),
+      },
+    });
+
+    await this.recordTelegramEvent({
+      eventId: `${telegramChargeId}:BILLING.SUBSCRIPTION.ACTIVATED`,
+      eventType: 'BILLING.SUBSCRIPTION.ACTIVATED',
+      subscriptionId,
+      summary: `Subscription activated via ${paymentMethod}`,
+      resource: {
+        id: subscriptionId,
+        status: 'ACTIVE',
+        plan_id: plan.plan_id,
+        start_time: now.toISOString(),
+        status_update_time: now.toISOString(),
+      },
+    });
+
+    await this.recordTelegramEvent({
+      eventId: `${telegramChargeId}:PAYMENT.SALE.COMPLETED`,
+      eventType: 'PAYMENT.SALE.COMPLETED',
+      subscriptionId,
+      summary:
+        paymentMethod === 'telegram_card'
+          ? `Telegram card payment completed (${paymentCurrency} ${amountForSubscription.toFixed(2)})`
+          : `Telegram Stars payment completed (${totalAmount} XTR)`,
+      resource: {
+        id: telegramChargeId,
+        state: 'completed',
+        billing_agreement_id: subscriptionId,
+        amount: {
+          total:
+            paymentMethod === 'telegram_card'
+              ? amountForSubscription.toFixed(2)
+              : String(totalAmount),
+          currency: paymentCurrency,
+        },
+        payment_mode: paymentMethod,
+        create_time: now.toISOString(),
+      },
+    });
+
+    await this.activateUserFeatures(tgId, planName, paymentMethod);
 
     if (paymentMethod === 'telegram_stars') {
       await this.telegramService.notifyStarsPaymentReceived(tgId, {
@@ -381,7 +463,7 @@ export class TelegramPaymentService {
     const now = new Date();
 
     const expired = await this.subscriptionModel.find({
-      provider: 'telegram_stars',
+      provider: { $in: ['telegram_stars', 'telegram_card'] },
       status: 'ACTIVE',
       expires_at: { $lte: now },
     }).lean() as any[];
@@ -389,7 +471,7 @@ export class TelegramPaymentService {
     for (const sub of expired) {
       await this.subscriptionModel.updateOne(
         { _id: sub._id },
-        { $set: { status: 'EXPIRED' } },
+        { $set: { status: 'EXPIRED', cancel_at_period_end: false } },
       );
 
       const userId = Number(sub.user_id);
@@ -406,7 +488,7 @@ export class TelegramPaymentService {
     }
 
     if (expired.length > 0) {
-      this.appLogger.info(`Expired ${expired.length} stale Stars subscriptions`);
+      this.appLogger.info(`Expired ${expired.length} stale Telegram subscriptions`);
     }
 
     return expired.length;
@@ -461,7 +543,11 @@ export class TelegramPaymentService {
   /**
    * Activates premium features for the user in the mbot DB.
    */
-  private async activateUserFeatures(tgId: number, planName: string): Promise<void> {
+  private async activateUserFeatures(
+    tgId: number,
+    planName: string,
+    provider: 'telegram_stars' | 'telegram_card',
+  ): Promise<void> {
     // Delegate to userModel: mark is_pro = true, tier = planName
     await this.userModel.updateOne(
       { id: tgId },
@@ -470,7 +556,8 @@ export class TelegramPaymentService {
           is_pro: true,
           'pro_features.subscription.tier': planName,
           'pro_features.subscription.active': true,
-          'pro_features.subscription.auto_renew': true, // Stars = Telegram native auto-recurring
+          // Stars can auto-renew natively, card renewals are manual from the app.
+          'pro_features.subscription.auto_renew': provider === 'telegram_stars',
         },
       },
     );
@@ -508,28 +595,33 @@ export class TelegramPaymentService {
    * After cancellation the user retains access until expires_at, then loses it.
    */
   async cancelStarSubscription(tgId: number): Promise<{ ok: boolean; accessUntil: Date | null }> {
-    const sub = await this.subscriptionModel.findOne({
-      user_id: String(tgId),
-      provider: 'telegram_stars',
-      status: 'ACTIVE',
-    }).lean() as any;
+    const sub = await this.findCurrentTelegramSubscription(tgId);
 
     if (!sub) {
-      throw new NotFoundException('No active Stars subscription found');
+      throw new NotFoundException('No active Telegram subscription found');
     }
 
-    const chargeId: string = sub.telegram_charge_id;
-    if (!chargeId) {
+    const isStars = sub.provider === 'telegram_stars';
+    const chargeId: string | undefined = sub.telegram_charge_id;
+    if (isStars && !chargeId) {
       throw new BadRequestException('Subscription has no charge ID for cancellation');
     }
 
-    // Cancel the Telegram recurring subscription
-    await this.telegramService.editUserStarSubscription(tgId, chargeId, true);
+    // Cancel the Telegram recurring subscription when the provider supports it.
+    if (isStars && chargeId) {
+      await this.telegramService.editUserStarSubscription(tgId, chargeId, true);
+    }
 
     // Mark as cancel-at-period-end in our DB
     await this.subscriptionModel.updateOne(
       { _id: sub._id },
-      { $set: { cancel_at_period_end: true } },
+      {
+        $set: {
+          status: 'CANCELLED',
+          cancelledAt: new Date(),
+          cancel_at_period_end: true,
+        },
+      },
     );
 
     // Update user's auto_renew flag
@@ -540,14 +632,105 @@ export class TelegramPaymentService {
 
     const accessUntil = sub.expires_at ? new Date(sub.expires_at) : null;
 
-    // Notify user
-    await this.telegramService.notifyStarsCancellation(tgId, { accessUntil }).catch(
+    await this.recordTelegramEvent({
+      eventId: `${chargeId ?? sub.paypal_subscription_id}:BILLING.SUBSCRIPTION.CANCELLED`,
+      eventType: 'BILLING.SUBSCRIPTION.CANCELLED',
+      subscriptionId: sub.paypal_subscription_id,
+      summary: isStars
+        ? 'Telegram Stars subscription cancellation scheduled'
+        : 'Telegram Card subscription cancellation scheduled',
+      resource: {
+        id: sub.paypal_subscription_id,
+        status: 'CANCELLED',
+        plan_id: sub.plan_id,
+        status_update_time: new Date().toISOString(),
+      },
+    });
+
+    // Notify user (provider-aware copy)
+    await this.telegramService.notifyTelegramSubscriptionCancellation(tgId, {
+      accessUntil,
+      provider: isStars ? 'telegram_stars' : 'telegram_card',
+    }).catch(
       (e) => this.logger.error('Cancel notify failed', e),
     );
 
     this.appLogger.info(`Stars subscription cancelled for user ${tgId}, access until ${accessUntil?.toISOString()}`);
 
     return { ok: true, accessUntil };
+  }
+
+  /**
+   * Toggles Telegram auto-renew for Stars or Card subscriptions.
+   * For Stars, forwards to Telegram's native recurring subscription API.
+   * For Card, updates our local billing state only.
+   */
+  async toggleTelegramAutoRenew(
+    tgId: number,
+    autoRenew: boolean,
+  ): Promise<{ ok: boolean; auto_renew: boolean; status: string; accessUntil: Date | null }> {
+    const sub = await this.findCurrentTelegramSubscription(tgId);
+
+    if (!sub) {
+      throw new NotFoundException('No active Telegram subscription found');
+    }
+
+    const isStars = sub.provider === 'telegram_stars';
+    const chargeId: string | undefined = sub.telegram_charge_id;
+
+    if (isStars && !chargeId) {
+      throw new BadRequestException('Subscription has no charge ID for auto-renew toggle');
+    }
+
+    if (isStars && chargeId) {
+      await this.telegramService.editUserStarSubscription(tgId, chargeId, !autoRenew);
+    }
+
+    const updatedStatus = autoRenew ? 'ACTIVE' : 'CANCELLED';
+    const update: Record<string, any> = {
+      status: updatedStatus,
+      cancel_at_period_end: !autoRenew,
+      cancelledAt: autoRenew ? null : new Date(),
+    };
+
+    await this.subscriptionModel.updateOne({ _id: sub._id }, { $set: update });
+
+    await this.userModel.updateOne(
+      { id: tgId },
+      { $set: { 'pro_features.subscription.auto_renew': autoRenew } },
+    );
+
+    if (!autoRenew) {
+      await this.telegramService.notifyTelegramSubscriptionCancellation(tgId, {
+        accessUntil: sub.expires_at ? new Date(sub.expires_at) : null,
+        provider: isStars ? 'telegram_stars' : 'telegram_card',
+      }).catch((e) => this.logger.error('Auto-renew cancel notify failed', e));
+    }
+
+    if (!autoRenew) {
+      await this.recordTelegramEvent({
+        eventId: `${chargeId ?? sub.paypal_subscription_id}:BILLING.SUBSCRIPTION.CANCELLED`,
+        eventType: 'BILLING.SUBSCRIPTION.CANCELLED',
+        subscriptionId: sub.paypal_subscription_id,
+        summary: isStars
+          ? 'Telegram Stars auto-renew disabled'
+          : 'Telegram Card auto-renew disabled',
+        resource: {
+          id: sub.paypal_subscription_id,
+          status: 'CANCELLED',
+          plan_id: sub.plan_id,
+          status_update_time: new Date().toISOString(),
+        },
+      });
+    }
+
+    const accessUntil = sub.expires_at ? new Date(sub.expires_at) : null;
+
+    this.appLogger.info(
+      `${isStars ? 'Stars' : 'Card'} auto-renew ${autoRenew ? 'enabled' : 'disabled'} for user ${tgId}`,
+    );
+
+    return { ok: true, auto_renew: autoRenew, status: updatedStatus, accessUntil };
   }
 
   /**
@@ -576,5 +759,51 @@ export class TelegramPaymentService {
   /** Short deterministic hash prefix for synthetic subscription IDs */
   private shortHash(input: string): string {
     return createHash('sha256').update(input).digest('hex').slice(0, 12).toUpperCase();
+  }
+
+  private async recordTelegramEvent(params: {
+    eventId: string;
+    eventType: string;
+    subscriptionId: string;
+    summary: string;
+    resource: Record<string, any>;
+  }): Promise<void> {
+    const now = new Date();
+    try {
+      await this.paymentEventModel.findOneAndUpdate(
+        { event_id: params.eventId },
+        {
+          $setOnInsert: {
+            event_id: params.eventId,
+            eventType: params.eventType,
+            subscriptionId: params.subscriptionId,
+            eventBody: {
+              id: params.eventId,
+              event_type: params.eventType,
+              create_time: now.toISOString(),
+              summary: params.summary,
+              resource: params.resource,
+            },
+            processed: true,
+            invalid_signature: false,
+            processedAt: now,
+            lastAttemptAt: now,
+          },
+        },
+        { upsert: true, new: false },
+      );
+    } catch (err: any) {
+      if (err?.code !== 11000) {
+        this.logger.error(`Failed to persist Telegram event ${params.eventId}: ${err?.message}`);
+      }
+    }
+  }
+
+  private async findCurrentTelegramSubscription(tgId: number): Promise<any | null> {
+    return this.subscriptionModel.findOne({
+      user_id: String(tgId),
+      provider: { $in: ['telegram_stars', 'telegram_card'] },
+      status: { $in: ['ACTIVE', 'SUSPENDED', 'CANCELLED'] },
+    }).sort({ createdAt: -1 }).lean() as Promise<any | null>;
   }
 }
