@@ -122,6 +122,9 @@ export class Subscription extends Document {
     })
     provider?: 'paypal' | 'telegram_stars' | 'telegram_card';
 
+    @Prop({ type: String, index: true })
+    approval_url?: string; // URL de aprobación de PayPal (para revisiones de suscripción)
+
     // ── Telegram Stars fields ────────────────────────────────────────────
     // telegram_charge_id: Telegram's unique charge identifier.
     // Used for idempotency and refund correlation.

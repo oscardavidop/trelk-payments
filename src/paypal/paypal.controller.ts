@@ -350,6 +350,7 @@ export class PaypalController {
           status: 'APPROVAL_PENDING',
           features_applied: false,
           activation_notified: false,
+          approval_url: approvalUrl,
         });
 
         this.logger.log(

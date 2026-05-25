@@ -180,12 +180,14 @@ export class SubscriptionService {
         currency: subscription.currency ?? 'USD',
         start_time: subscription.start_time ?? null,
         cancelled_at: subscription.cancelledAt ?? null,
+        approval_url: subscription.approval_url ?? null,
         // New fields for deferred cancel + scheduled downgrade
         cancel_at_period_end: subscription.cancel_at_period_end ?? false,
         scheduled_plan_id: subscription.scheduled_plan_id ?? null,
         // Billing preview: what will actually be charged at next renewal.
         // Differs from `amount` when a downgrade is scheduled.
         billing_preview: await this.resolveBillingPreview(subscription),
+
       },
       isPremium,
     };

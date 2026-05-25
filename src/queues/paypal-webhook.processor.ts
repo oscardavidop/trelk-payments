@@ -208,11 +208,26 @@ export class PaypalWebhookProcessor extends WorkerHost {
         break;
 
       // ── Suscripción activa (primer pago procesado) ──────────────────────────
-      case 'BILLING.SUBSCRIPTION.ACTIVATED':
+      case 'BILLING.SUBSCRIPTION.ACTIVATED': {
         this.logger.log(`[${correlationId}] Subscription ACTIVATED: ${resource.id}`);
         await this.subscriptionService.updateStatus(resource.id, 'ACTIVE', resource);
         await this.subscriptionService.tryActivateFeatures(resource.id);
+        // Sync billing data from activation resource if present (PayPal may include it)
+        const activatedNextBillingTime = resource.billing_info?.next_billing_time as string | undefined;
+        const activatedLastPaymentAmount = parseFloat(
+          resource.billing_info?.last_payment?.amount?.value ?? '0',
+        );
+        const activatedLastPaymentCurrency = resource.billing_info?.last_payment?.amount?.currency_code as string | undefined;
+        if (activatedNextBillingTime || activatedLastPaymentAmount > 0) {
+          await this.subscriptionService.syncBillingData(
+            resource.id,
+            activatedLastPaymentAmount > 0 ? activatedLastPaymentAmount : undefined,
+            activatedLastPaymentCurrency,
+            activatedNextBillingTime,
+          );
+        }
         break;
+      }
 
       // ── Actualización: associate user via custom_id + sincronizar plan ────────
       case 'BILLING.SUBSCRIPTION.UPDATED': {
